@@ -1,0 +1,35 @@
+[project]
+name = "anaerobic-design-mcp"
+version = "0.1.0"
+description = "MCP server for anaerobic digester design using WaterTAP framework"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Anaerobic Design Team" }
+]
+
+dependencies = [
+    "fastmcp>=0.1.0",
+    "pydantic>=2.0.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "python-dotenv>=1.0.0"
+]
+
+[project.optional-dependencies]
+watertap = [
+    "watertap>=0.9.0",
+    "idaes-pse>=2.2.0",
+    "pyomo>=6.5.0"
+]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

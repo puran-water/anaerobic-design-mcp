@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "anaerobic-design": {
+      "type": "stdio",
+      "command": "/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe",
+      "args": [
+        "C:\\Users\\hvksh\\mcp-servers\\anaerobic-design-mcp\\server.py"
+      ],
+      "env": {
+        "MCP_TIMEOUT": "600000",
+        "ANAEROBIC_DESIGN_MCP_ROOT": "C:\\Users\\hvksh\\mcp-servers\\anaerobic-design-mcp"
+      }
+    },
+    "ADM1-State-Variable-Estimator": {
+      "type": "stdio",
+      "command": "codex",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "CODEX_HOME": "/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp/.codex"
+      }
+    }
+  }
+}
