@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+log/
+logs/
+simulation_logs/
+
+# Sessions and cache
+sessions/
+.codex/sessions/
+.cache/
+*.cache
+
+# Security - NEVER commit these
+auth.json
+.env
+*.key
+*.pem
+*.crt
+secrets/
+credentials/
+
+# Project specific
+adm1_state.json
+simulation_results.json
+*.zip
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.pytest_cache/
+.hypothesis/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Model outputs
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+
+# Solver files
+*.nl
+*.sol
