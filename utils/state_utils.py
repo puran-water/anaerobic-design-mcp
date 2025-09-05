@@ -209,12 +209,23 @@ def regularize_adm1_state_for_initialization(
                 warnings.append(f"Clipped S_IC from {s_ic_val:g} to {new_val:g} kg C/m3 for initialization")
             state["S_IC"] = new_val
 
-    # 5) Balance strong ions: set cations/anions to matched, moderate values
-    s_cat = gv("S_cat")
-    s_an = gv("S_an")
-    if s_cat <= 0 or s_an <= 0 or abs(s_cat - s_an) > 0.02:
-        state["S_cat"] = 0.04
-        state["S_an"] = 0.04
-        warnings.append("Set S_cat and S_an to 0.04 kmol/m3 for electroneutrality in initialization")
+    # 5) Balance strong ions properly (S_cat/S_an as OTHER ions only)
+    s_cat = gv("S_cat", 0.0)
+    s_an = gv("S_an", 0.0)
+    
+    # For initialization, we want moderate, balanced OTHER ions
+    # Don't try to fully balance here - just ensure reasonable values
+    # Full balancing should be done by the ADM1 state generator
+    
+    # Check if grossly imbalanced or unreasonable
+    if abs(s_cat - s_an) > 0.05 or s_cat < 0.001 or s_an < 0.001:
+        # Set to moderate, balanced values for OTHER ions
+        # Typical range: 0.01-0.05 kmol/m³ for other ions like Na+, Cl-
+        state["S_cat"] = 0.02  # Reduced from 0.04 to avoid over-specification
+        state["S_an"] = 0.02
+        warnings.append(
+            f"Reset S_cat and S_an to 0.02 kmol/m³ (OTHER ions) for initialization. "
+            f"Original: S_cat={s_cat:.3f}, S_an={s_an:.3f}"
+        )
 
     return state, warnings

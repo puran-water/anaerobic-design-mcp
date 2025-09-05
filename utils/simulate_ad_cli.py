@@ -1,8 +1,19 @@
 """
 Child process entrypoint for running AD simulations.
 
-Reads JSON input from stdin, runs the simulation, and writes JSON to stdout.
-All logging is routed to stderr to keep stdout strictly JSON-only.
+This module implements subprocess isolation for WaterTAP simulations to prevent
+stdout/stderr contamination of the MCP server's STDIO communication channel.
+
+Pattern:
+1. Parent MCP server spawns this as a subprocess
+2. Reads JSON input from stdin (simulation parameters)
+3. Runs WaterTAP simulation with all logging routed to stderr
+4. Writes JSON results to stdout
+5. Parent parses JSON from stdout, ignoring any warnings on stderr
+
+This isolation is critical because IDAES/Pyomo/WaterTAP can emit warnings
+and solver output that would corrupt the MCP JSON protocol if mixed with
+the response stream.
 """
 
 import sys
@@ -15,10 +26,25 @@ def _configure_child_logging() -> None:
     """Route logs to stderr in the child process to protect parent STDIO."""
     # Basic configuration: INFO level, stderr stream
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="[%(levelname)s] %(name)s: %(message)s")
-    # Quiet extremely noisy loggers if needed
+    
+    # Configure IDAES logging to stderr and suppress warnings
+    try:
+        import idaes
+        # Redirect IDAES console handler to stderr
+        idaes.cfg["logging"]["handlers"]["console"]["stream"] = "ext://sys.stderr"
+        # Set IDAES loggers to ERROR level to suppress warnings
+        idaes.cfg["logging"]["loggers"]["idaes"]["level"] = "ERROR"
+        idaes.cfg["logging"]["loggers"]["pyomo"]["level"] = "ERROR"
+        idaes.cfg["logging"]["loggers"]["watertap"]["level"] = "ERROR"
+        # Apply the configuration
+        idaes.reconfig()
+    except Exception:
+        pass
+    
+    # Also set Python logging levels for these packages
     for noisy in ("pyomo", "idaes", "watertap"):
         try:
-            logging.getLogger(noisy).setLevel(logging.INFO)
+            logging.getLogger(noisy).setLevel(logging.ERROR)
         except Exception:
             pass
 

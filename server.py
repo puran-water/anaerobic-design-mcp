@@ -10,11 +10,14 @@ Provides tools for parameter elicitation, heuristic sizing, WaterTAP simulation,
 import os
 import sys
 import json
+import re
 import logging
 import subprocess
 import tempfile
+import datetime
+import copy
 import anyio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from pathlib import Path
 
 # Load environment variables
@@ -51,7 +54,11 @@ logger = logging.getLogger(__name__)
 
 # Import utility modules
 from utils.heuristic_sizing import perform_heuristic_sizing
-from utils.adm1_validation import validate_adm1_state as validate_adm1_composite
+from utils.adm1_validation import (
+    validate_adm1_state as validate_adm1_composite,
+    compute_bulk_composites as _compute_bulk_composites,
+    calculate_strong_ion_residual as _calculate_strong_ion_residual,
+)
 from utils.feedstock_characterization import (
     create_default_adm1_state
 )
@@ -70,6 +77,148 @@ mcp = FastMCP("Anaerobic Digester Design Server")
 
 # Project root
 PROJECT_ROOT = Path(__file__).parent
+
+
+def _to_float(value: Union[float, int, str, None]) -> Optional[float]:
+    """
+    Coerce a value to float, handling strings and None.
+    Used to fix parameter validation issues with numeric strings.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _filter_simulation_response(
+    results: Dict[str, Any],
+    detail_level: str = "summary"
+) -> Dict[str, Any]:
+    """
+    Filter simulation results to reduce response size.
+    
+    Args:
+        results: Full simulation results
+        detail_level: "summary" for KPIs only, "full" for all details
+        
+    Returns:
+        Filtered results dictionary
+    """
+    if detail_level == "summary":
+        # Return only essential KPIs
+        filtered = {
+            "status": results.get("status"),
+            "flowsheet_type": results.get("flowsheet_type"),
+        }
+        
+        # Add operational results if present
+        if "operational_results" in results:
+            op = results["operational_results"]
+            filtered["operational_results"] = {
+                "biogas_production_m3d": op.get("biogas_production_m3d"),
+                "methane_fraction": op.get("methane_fraction"),
+                "methane_production_m3d": op.get("methane_production_m3d"),
+                "sludge_production_m3d": op.get("sludge_production_m3d"),
+                "centrate_flow_m3d": op.get("centrate_flow_m3d"),
+            }
+            # Add MBR-specific if present
+            if "mbr_permeate_flow_m3d" in op:
+                filtered["operational_results"]["mbr_permeate_flow_m3d"] = op["mbr_permeate_flow_m3d"]
+        
+        # Add economic results if present
+        if "economic_results" in results:
+            ec = results["economic_results"]
+            filtered["economic_results"] = {
+                "total_capital_cost": ec.get("total_capital_cost"),
+                "total_operating_cost": ec.get("total_operating_cost"),
+                "LCOW": ec.get("LCOW"),
+            }
+        
+        # Add convergence info
+        if "convergence_info" in results:
+            conv = results["convergence_info"]
+            filtered["convergence_info"] = {
+                "solver_status": conv.get("solver_status"),
+                "degrees_of_freedom": conv.get("degrees_of_freedom"),
+            }
+        
+        # Add summary if present
+        if "summary" in results:
+            filtered["summary"] = results["summary"]
+        
+        # Add error info if failed
+        if results.get("status") == "error":
+            filtered["message"] = results.get("message")
+            filtered["error"] = results.get("error")
+        
+        return filtered
+    
+    else:
+        # Return full results but remove very large objects
+        filtered = copy.deepcopy(results)
+        
+        # Remove solver logs and raw model objects if present
+        keys_to_remove = ["raw_stdout", "stderr", "model_str", "solver_log"]
+        for key in keys_to_remove:
+            filtered.pop(key, None)
+        
+        return filtered
+
+
+def _save_full_logs(results: Dict[str, Any]) -> Optional[str]:
+    """
+    Save full simulation logs to a temporary file.
+    
+    Returns path to the log file if saved, None otherwise.
+    """
+    try:
+        import tempfile
+        import json
+        
+        # Create temp file in project directory
+        log_dir = PROJECT_ROOT / "simulation_logs"
+        log_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = log_dir / f"simulation_{timestamp}.json"
+        
+        with open(log_file, "w") as f:
+            json.dump(results, f, indent=2, default=str)
+        
+        return str(log_file)
+    except Exception as e:
+        logger.warning(f"Failed to save simulation logs: {e}")
+        return None
+
+
+def _extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract the last valid JSON object from potentially corrupted output.
+    Used as fallback when direct JSON parsing fails due to warnings in stdout.
+    """
+    if not text:
+        return None
+    
+    # Try to find the last complete JSON object in the output
+    # Look for pattern starting with { and ending with }
+    try:
+        # Find all potential JSON objects
+        json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+        matches = re.findall(json_pattern, text)
+        
+        if matches:
+            # Try parsing from the last match (most likely to be our result)
+            for match in reversed(matches):
+                try:
+                    return json.loads(match)
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        logger.debug(f"Failed to extract JSON via regex: {e}")
+    
+    return None
 
 
 def _run_simulation_in_subprocess(sim_input: Dict[str, Any]) -> Dict[str, Any]:
@@ -114,7 +263,15 @@ def _run_simulation_in_subprocess(sim_input: Dict[str, Any]) -> Dict[str, Any]:
                 "message": "No output from child process",
             }
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse child JSON: {e}. Raw: {proc.stdout[:500]}")
+            logger.warning(f"Failed to parse child JSON directly: {e}. Attempting fallback extraction...")
+            
+            # Try fallback JSON extraction
+            extracted = _extract_json_from_output(proc.stdout)
+            if extracted:
+                logger.info("Successfully extracted JSON using fallback method")
+                return extracted
+            
+            logger.error(f"Failed to extract JSON even with fallback. Raw: {proc.stdout[:500]}")
             return {"status": "error", "message": f"Invalid JSON from child process: {e}", "raw_stdout": proc.stdout}
     except subprocess.TimeoutExpired as e:
         logger.error(f"Child simulation timed out after {timeout_s}s")
@@ -482,6 +639,73 @@ async def validate_adm1_state(
 
 
 @mcp.tool()
+async def compute_bulk_composites(
+    adm1_state: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Compute COD, TSS, VSS, TKN, TP (mg/L) from an ADM1 state.
+
+    Accepts plain dict or JSON string. Returns calculated values only.
+    """
+    try:
+        # Normalize inputs if provided as JSON strings
+        if isinstance(adm1_state, str):
+            import json as _json
+            adm1_state = _json.loads(adm1_state)
+
+        # If values are [value, unit, note], take value
+        clean_state = {k: (v[0] if isinstance(v, list) else v) for k, v in adm1_state.items()}
+        comps = _compute_bulk_composites(clean_state)
+        return {"status": "success", "composites_mg_l": comps}
+    except Exception as e:
+        logger.error(f"Error in compute_bulk_composites: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+async def check_strong_ion_balance(
+    adm1_state: Dict[str, Any],
+    ph: float = 7.0,
+    max_imbalance_percent: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    Check strong-ion charge balance consistency vs pH using a Modified ADM1-style residual.
+
+    Args:
+        adm1_state: ADM1 state dict (accepts [value, unit, note] entries)
+        ph: pH to use for acid-base speciation terms
+        max_imbalance_percent: Threshold for pass/fail
+
+    Returns:
+        status, residual metrics, pass/fail recommendation
+    """
+    try:
+        if isinstance(adm1_state, str):
+            import json as _json
+            adm1_state = _json.loads(adm1_state)
+
+        clean_state = {k: (v[0] if isinstance(v, list) else v) for k, v in adm1_state.items()}
+        res = _calculate_strong_ion_residual(clean_state, ph=ph)
+        ok = res.get("imbalance_percent", 1e9) <= max_imbalance_percent
+
+        # Guidance: S_cat/S_an should capture OTHER ions, exclude explicit K/Mg
+        guidance = (
+            "S_cat/S_an should exclude explicit K+ and Mg2+ when bio_P=True to avoid double counting. "
+            "If imbalance is high, consider rebalancing S_cat/S_an after setting S_K/S_Mg and S_IC at the target pH."
+        )
+        return {
+            "status": "success",
+            "ph": ph,
+            **res,
+            "pass": ok,
+            "threshold_percent": max_imbalance_percent,
+            "guidance": guidance,
+        }
+    except Exception as e:
+        logger.error(f"Error in check_strong_ion_balance: {e}")
+        return {"status": "error", "message": str(e)}
+
+@mcp.tool()
 async def get_design_state() -> Dict[str, Any]:
     """
     Get the current state of the anaerobic digester design process.
@@ -572,8 +796,8 @@ async def reset_design() -> Dict[str, Any]:
 
 @mcp.tool()
 async def heuristic_sizing_ad(
-    biomass_yield: Optional[float] = None,
-    target_srt_days: Optional[float] = None,
+    biomass_yield: Optional[Union[float, int, str]] = None,
+    target_srt_days: Optional[Union[float, int, str]] = None,
     use_current_basis: bool = True,
     custom_basis: Optional[AnyDict] = None
 ) -> Dict[str, Any]:
@@ -633,6 +857,10 @@ async def heuristic_sizing_ad(
                 "message": "Either use_current_basis must be True or custom_basis must be provided"
             }
         
+        # Coerce numeric parameters from strings if needed
+        biomass_yield = _to_float(biomass_yield)
+        target_srt_days = _to_float(target_srt_days)
+        
         # Perform heuristic sizing
         sizing_result = perform_heuristic_sizing(
             basis_of_design=basis,
@@ -675,6 +903,7 @@ async def simulate_ad_system_tool(
     use_current_state: bool = True,
     costing_method: str = "WaterTAPCosting",
     initialize_only: bool = False,
+    detail_level: str = "summary",
     custom_inputs: Optional[AnyDict] = None
 ) -> Dict[str, Any]:
     """
@@ -688,6 +917,7 @@ async def simulate_ad_system_tool(
         use_current_state: Use parameters from current design state (default True)
         costing_method: Costing approach - "WaterTAPCosting" or None
         initialize_only: Only build and initialize model (don't solve)
+        detail_level: Response detail - "summary" for KPIs only, "full" for all details
         custom_inputs: Optional custom basis, ADM1 state, and config (any JSON object with keys `basis_of_design`, `adm1_state`, `heuristic_config`). Strings containing JSON are accepted.
     
     Returns:
@@ -801,7 +1031,16 @@ async def simulate_ad_system_tool(
         if sim_results["status"] == "success":
             sim_results["summary"] = _generate_simulation_summary(sim_results)
         
-        return sim_results
+        # Save full logs if successful
+        if sim_results["status"] in ["success", "initialized"]:
+            log_path = _save_full_logs(sim_results)
+            if log_path:
+                sim_results["full_log_path"] = log_path
+        
+        # Filter response based on detail level
+        filtered_results = _filter_simulation_response(sim_results, detail_level)
+        
+        return filtered_results
         
     except Exception as e:
         logger.error(f"Error in simulate_ad_system_tool: {str(e)}")
@@ -890,6 +1129,8 @@ def main():
     logger.info("Available tools:")
     logger.info("  - elicit_basis_of_design: Collect design parameters")
     logger.info("  - validate_adm1_state: Validate ADM1 state against composite parameters")
+    logger.info("  - compute_bulk_composites: Compute COD/TSS/VSS/TKN/TP from ADM1 state")
+    logger.info("  - check_strong_ion_balance: Check cation/anion balance consistency vs pH")
     logger.info("  - heuristic_sizing_ad: Calculate digester sizing and configuration")
     if SIMULATION_AVAILABLE:
         logger.info("  - simulate_ad_system_tool: Run WaterTAP simulation")

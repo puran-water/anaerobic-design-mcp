@@ -323,7 +323,7 @@ def create_default_adm1_state(
         "S_h2": 0.0001,
         "S_ch4": 0.0001,
         "S_IC": 0.05,                 # kg/m³ (mass concentration in Modified ADM1)
-        "S_IN": 0.03,                 # kg/m³ (mass concentration in Modified ADM1)
+        "S_IN": 0.003,                # kg/m³ (3000 mg/L as N - more realistic)
         "S_I": cod_kg_m3 * 0.05,     # 5% as soluble inerts
         "S_cat": 0.04,                # kmol/m³ (balanced)
         "S_an": 0.04,                 # kmol/m³ (balanced)
@@ -346,18 +346,18 @@ def create_default_adm1_state(
     
     # Add Modified ADM1 P-species if requested
     if use_modified_adm1:
-        # Typical P content ~1% of COD (all as mass concentrations in conc_mass_comp)
+        # Typical P content ~1% of COD (all as mass concentrations in kg/m³)
         p_fraction = 0.01
         adm1_state.update({
-            # Soluble P-species
-            "S_IP": 0.005,            # kmol/m³ - Inorganic phosphorus
-            "S_K": 0.01,              # kmol/m³ - Potassium
-            "S_Mg": 0.005,            # kmol/m³ - Magnesium
+            # Soluble P-species (kg/m³ - NOT kmol/m³)
+            "S_IP": 0.0005,           # kg/m³ - Inorganic phosphorus (500 mg/L as P)
+            "S_K": 0.001,             # kg/m³ - Potassium (1000 mg/L as K)
+            "S_Mg": 0.0005,           # kg/m³ - Magnesium (500 mg/L as Mg)
             
             # Particulate P-species (minimal in raw feed)
             "X_PAO": 0.01,            # kg/m³ - PAOs minimal in raw feed
             "X_PHA": 0.001,           # kg/m³ - PHA storage minimal
-            "X_PP": cod_kg_m3 * p_fraction * 0.2,  # Some P as polyphosphates
+            "X_PP": cod_kg_m3 * p_fraction * 0.2,  # kg/m³ - Some P as polyphosphates
         })
     
     return adm1_state

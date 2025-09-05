@@ -259,6 +259,12 @@ def _build_common_components(
     _fix_or_set(m.fs.feed.properties[0].temperature, temp_k * pyo.units.K, label="feed.temperature")
     _fix_or_set(m.fs.feed.properties[0].pressure, pressure_pa * pyo.units.Pa, label="feed.pressure")
     
+    # Set scaling factors for feed properties to prevent IDAES warnings
+    # These scaling factors help with numerical stability and prevent "Missing scaling factor" warnings
+    iscale.set_scaling_factor(m.fs.feed.properties[0].flow_vol, max(1.0, 1.0/flow_m3_per_s))
+    iscale.set_scaling_factor(m.fs.feed.properties[0].temperature, 0.01)  # ~1/100 for temperatures around 300K
+    iscale.set_scaling_factor(m.fs.feed.properties[0].pressure, 1e-5)  # ~1/100000 for pressures around 100kPa
+    
     # Normalize ADM1 state values to native floats (handles [value, unit, explanation])
     clean_state, state_warnings = clean_adm1_state(adm1_state)
     if state_warnings:
@@ -314,14 +320,15 @@ def _build_common_components(
                 )
     
     # Add default values for P-species if not provided
-    # Aligned with create_default_adm1_state() in feedstock_characterization.py
+    # IMPORTANT: All P-species use kg/m³ units (NOT kmol/m³) in Modified ADM1
+    # This is consistent with conc_mass_comp property in WaterTAP
     p_species = {
-        "X_PAO": 0.01,   # Phosphorus accumulating organisms
-        "X_PHA": 0.001,  # Polyhydroxyalkanoates (aligned with feedstock_characterization)
-        "X_PP": 0.06,    # Polyphosphates (aligned with typical P-fraction * COD)
-        "S_IP": 0.005,   # Inorganic phosphorus
-        "S_K": 0.01,     # Potassium
-        "S_Mg": 0.005    # Magnesium
+        "X_PAO": 0.01,   # kg/m³ - Phosphorus accumulating organisms
+        "X_PHA": 0.001,  # kg/m³ - Polyhydroxyalkanoates  
+        "X_PP": 0.06,    # kg/m³ - Polyphosphates (typical P-fraction * COD)
+        "S_IP": 0.005,   # kg/m³ - Inorganic phosphorus (NOT kmol/m³)
+        "S_K": 0.01,     # kg/m³ - Potassium (NOT kmol/m³)
+        "S_Mg": 0.005    # kg/m³ - Magnesium (NOT kmol/m³)
     }
     
     for comp, default_value in p_species.items():
@@ -429,15 +436,39 @@ def _build_high_tss_flowsheet(
     
     # Configure dewatering from heuristics
     dewatering_config = heuristic_config.get("dewatering", {})
-    
+
+    # Helper: compute p_dewat from solids capture, inlet TSS, and target cake solids
+    def _estimate_tss_inlet_kg_m3_high_tss(hcfg: Dict[str, Any]) -> float:
+        try:
+            # Prefer sizing-basis steady-state TSS if available (mg/L)
+            tss_mg_l = float(hcfg.get("sizing_basis", {}).get("steady_state_tss_mg_l"))
+            return max(1e-6, tss_mg_l / 1000.0)
+        except Exception:
+            return 15.0  # fallback (kg/m³)
+
+    def _compute_p_dewat_from_mass_balance(tss_in_kg_m3: float, capture_fr: float, cake_solids_frac: float) -> float:
+        # Mass balance: Q_u/Q_in = (capture*TSS_in) / TSS_cake, where TSS_cake = cake_frac * rho
+        rho_sludge = 1000.0  # kg/m³, assume near water density
+        tss_cake = max(1e-6, cake_solids_frac * rho_sludge)
+        p = (max(0.0, capture_fr) * max(1e-9, tss_in_kg_m3)) / tss_cake
+        # Clamp to reasonable bounds to avoid infeasible soluble splits
+        return float(min(max(p, 0.005), 0.9))
+
     # TSS removal (solids capture)
-    capture_fraction = dewatering_config.get("capture_fraction", 0.95)
+    capture_fraction = (
+        dewatering_config.get("solids_capture_fraction")
+        if dewatering_config.get("solids_capture_fraction") is not None
+        else dewatering_config.get("capture_fraction", 0.95)
+    )
     _fix_or_set(m.fs.dewatering.TSS_rem, capture_fraction, label="dewatering.TSS_rem")
-    
-    # Hydraulic underflow split (relates to cake solids)
-    # For 22% cake solids, p_dewat ~ 0.05 (5% of flow to underflow)
+
+    # Target cake solids (mass fraction, e.g., 0.22 for 22% TS)
     cake_solids = dewatering_config.get("cake_solids_fraction", 0.22)
-    _fix_or_set(m.fs.dewatering.p_dewat, 0.05, label="dewatering.p_dewat")  # Tune this for desired cake solids
+
+    # Estimate inlet TSS to dewatering from sizing basis
+    tss_in_kg_m3 = _estimate_tss_inlet_kg_m3_high_tss(heuristic_config)
+    p_dewat_guess = _compute_p_dewat_from_mass_balance(tss_in_kg_m3, capture_fraction, cake_solids)
+    _fix_or_set(m.fs.dewatering.p_dewat, p_dewat_guess, label="dewatering.p_dewat")
     
     # Fix dewatering hydraulics (either HRT or volume); default HRT = 1800 s
     hrt_s = dewatering_config.get("hydraulic_retention_time_s", 1800)
@@ -648,9 +679,25 @@ def _build_low_tss_mbr_flowsheet(
     
     # Configure dewatering
     dewatering_config = heuristic_config.get("dewatering", {})
-    capture_fraction = dewatering_config.get("capture_fraction", 0.95)
+    capture_fraction = (
+        dewatering_config.get("solids_capture_fraction")
+        if dewatering_config.get("solids_capture_fraction") is not None
+        else dewatering_config.get("capture_fraction", 0.95)
+    )
     _fix_or_set(m.fs.dewatering.TSS_rem, capture_fraction, label="dewatering.TSS_rem")
-    _fix_or_set(m.fs.dewatering.p_dewat, 0.05, label="dewatering.p_dewat")
+
+    # For MBR branch, use digester MLSS as dewatering inlet concentration
+    def _estimate_tss_inlet_kg_m3_low_tss(hcfg: Dict[str, Any]) -> float:
+        try:
+            tss_mg_l = float(hcfg.get("digester", {}).get("mlss_mg_l"))
+            return max(1e-6, tss_mg_l / 1000.0)
+        except Exception:
+            return 15.0
+
+    cake_solids = dewatering_config.get("cake_solids_fraction", 0.22)
+    tss_in_kg_m3 = _estimate_tss_inlet_kg_m3_low_tss(heuristic_config)
+    p_dewat_guess = _compute_p_dewat_from_mass_balance(tss_in_kg_m3, capture_fraction, cake_solids)
+    _fix_or_set(m.fs.dewatering.p_dewat, p_dewat_guess, label="dewatering.p_dewat")
     # Fix dewatering hydraulics (either HRT or volume); default HRT = 1800 s
     hrt_s = dewatering_config.get("hydraulic_retention_time_s", 1800)
     try:
@@ -835,7 +882,8 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
             
             # Set up sequential decomposition
             seq = SequentialDecomposition()
-            seq.options.tear_method = "Direct"  # or "Wegstein" for acceleration
+            # Wegstein acceleration is generally more robust for recycle systems
+            seq.options.tear_method = "Wegstein"
             seq.options.iterLim = 50  # Max iterations
             seq.options.tol = 1e-5  # Convergence tolerance (option name is 'tol')
             
@@ -867,9 +915,48 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
             # Run decomposition with unit initialization callback
             seq.run(m, _init_unit_callback)
 
-            # After initialization, apply final user-provided state to feed
-            if hasattr(m.fs, "_final_adm1_state"):
-                logger.info("Applying final feed state after initialization")
+            # After initialization, gradually ramp to final state
+            if hasattr(m.fs, "_final_adm1_state") and hasattr(m.fs, "_init_adm1_state"):
+                logger.info("Ramping from init to final feed state")
+                
+                # Get solver for intermediate solves
+                solver = get_solver()
+                
+                # Components to ramp gradually (high VFAs and gases)
+                ramp_components = ["S_ac", "S_pro", "S_bu", "S_va", "S_co2", "S_IC"]
+                
+                # 3-step ramp for critical components
+                init_state = m.fs._init_adm1_state
+                final_state = m.fs._final_adm1_state
+                
+                for alpha in [0.33, 0.67, 1.0]:
+                    ramped_state = dict(init_state)
+                    
+                    # Ramp critical components gradually
+                    for comp in ramp_components:
+                        if comp in final_state and comp in init_state:
+                            ramped_state[comp] = (1-alpha)*init_state[comp] + alpha*final_state[comp]
+                        elif comp in final_state:
+                            ramped_state[comp] = final_state[comp]
+                    
+                    # Apply other components at full strength
+                    for comp in final_state:
+                        if comp not in ramp_components:
+                            ramped_state[comp] = final_state[comp]
+                    
+                    _apply_feed_state(m, ramped_state)
+                    
+                    # Solve at this intermediate point
+                    results = solver.solve(m, tee=False)
+                    if check_optimal_termination(results):
+                        logger.info(f"Ramp solve successful at alpha={alpha:.2f}")
+                    else:
+                        logger.warning(f"Ramp solve failed at alpha={alpha:.2f}, continuing anyway")
+                        # Continue anyway - sometimes later points converge even if earlier ones fail
+            
+            elif hasattr(m.fs, "_final_adm1_state"):
+                # Fallback to direct application if no init state
+                logger.info("Applying final feed state after initialization (no ramping)")
                 _apply_feed_state(m, m.fs._final_adm1_state)
 
             logger.info("Sequential decomposition completed")
@@ -941,6 +1028,12 @@ def solve_flowsheet(
     Solve the flowsheet and return results.
     """
     solver = get_solver()
+    
+    # Apply solver options from config if available
+    if hasattr(m.fs, 'config') and hasattr(m.fs.config, 'solver_options') and m.fs.config.solver_options:
+        for key, value in m.fs.config.solver_options.items():
+            solver.options[key] = value
+    
     # Route solver output to IDAES logger instead of stdout
     solve_logger = idaeslog.getSolveLogger("watertap.ad")
     with idaeslog.solver_log(solve_logger, idaeslog.INFO) as slc:
@@ -1108,6 +1201,12 @@ def simulate_ad_system(
             
             # Re-solve with costing
             solver = get_solver()
+            
+            # Apply solver options from config if available
+            if hasattr(m.fs, 'config') and m.fs.config.solver_options:
+                for key, value in m.fs.config.solver_options.items():
+                    solver.options[key] = value
+            
             solve_logger = idaeslog.getSolveLogger("watertap.ad.costing")
             with idaeslog.solver_log(solve_logger, idaeslog.INFO) as slc:
                 cost_results = solver.solve(m, tee=False)
