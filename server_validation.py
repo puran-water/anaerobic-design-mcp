@@ -52,7 +52,8 @@ async def validate_bulk_composites(
 async def validate_ion_balance(
     adm1_state: Dict[str, Any],
     ph: float = 7.0,
-    mode: str = "watertap"
+    mode: str = "watertap",
+    kmg_basis: str = "auto"
 ) -> Dict[str, Any]:
     """
     Check electroneutrality with proper speciation.
@@ -62,6 +63,10 @@ async def validate_ion_balance(
         adm1_state: ADM1 component concentrations
         ph: pH value (default 7.0)
         mode: "watertap" (match S_H_cons, no CO3--) or "general" (include CO3--)
+        kmg_basis: How to calculate K/Mg contributions:
+                  - "auto": Use X_PP for watertap mode, S_K/S_Mg for general
+                  - "xpp": Always use X_PP-based calculation
+                  - "sk_smg": Always use S_K/S_Mg values
     
     Returns:
         Detailed ion balance including:
@@ -78,7 +83,15 @@ async def validate_ion_balance(
         if warnings:
             logger.warning(f"State cleaning warnings: {warnings}")
         
-        result = calculate_strong_ion_residual(clean_state, ph, mode)
+        # Determine actual K/Mg basis
+        if kmg_basis == "auto":
+            actual_mode = mode
+        elif kmg_basis == "xpp":
+            actual_mode = "watertap"  # Force X_PP-based calculation
+        else:  # sk_smg
+            actual_mode = "general"   # Force S_K/S_Mg-based calculation
+        
+        result = calculate_strong_ion_residual(clean_state, ph, actual_mode)
         
         # Add summary message
         if result["balanced"]:

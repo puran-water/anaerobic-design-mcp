@@ -267,6 +267,22 @@ def _build_common_components(
     
     # Normalize ADM1 state values to native floats (handles [value, unit, explanation])
     clean_state, state_warnings = clean_adm1_state(adm1_state)
+    
+    # Additional scaling for ions (kmol/m³ typically 0.01-0.05)
+    if hasattr(m.fs.feed.properties[0], 'cations'):
+        iscale.set_scaling_factor(m.fs.feed.properties[0].cations, 100)
+    if hasattr(m.fs.feed.properties[0], 'anions'):
+        iscale.set_scaling_factor(m.fs.feed.properties[0].anions, 100)
+    
+    # Scale high VFA concentrations (can be 5-10 kg/m³)
+    for vfa in ['S_ac', 'S_pro', 'S_bu', 'S_va']:
+        if vfa in m.fs.feed.properties[0].conc_mass_comp and vfa in clean_state:
+            vfa_value = clean_state.get(vfa, 1.0)
+            if vfa_value > 0.1:  # Only scale if significant
+                iscale.set_scaling_factor(
+                    m.fs.feed.properties[0].conc_mass_comp[vfa],
+                    1.0/max(1.0, vfa_value)
+                )
     if state_warnings:
         for w in state_warnings:
             logger.warning(w)
@@ -290,9 +306,10 @@ def _build_common_components(
         for w in init_warnings:
             logger.warning(f"Init-state adjust: {w}")
 
-    # Save both states on the flowsheet for later re-application after init
+    # Save both states and config on the flowsheet for later re-application after init
     m.fs._final_adm1_state = clean_state
     m.fs._init_adm1_state = init_state
+    m.fs._heuristic_config = heuristic_config  # Store for access during ramping
 
     # Set Modified ADM1 state variables in feed for initialization state
     for comp, value in init_state.items():
@@ -844,8 +861,8 @@ def _safe_initialize_ad(m: pyo.ConcreteModel) -> None:
             fallback_state[comp] = val
         # Moderate inorganic carbon and balance ions
         fallback_state["S_IC"] = 0.08
-        fallback_state["S_cat"] = 0.04
-        fallback_state["S_an"] = 0.04
+        fallback_state["S_cat"] = 0.02  # Harmonized with state_utils.py
+        fallback_state["S_an"] = 0.02   # OTHER ions only, moderate value
         _apply_feed_state(m, fallback_state)
     except Exception as e:
         logger.debug(f"Failed to apply fallback feed state: {e}")
@@ -925,11 +942,17 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
                 # Components to ramp gradually (high VFAs and gases)
                 ramp_components = ["S_ac", "S_pro", "S_bu", "S_va", "S_co2", "S_IC"]
                 
-                # 3-step ramp for critical components
+                # Configurable ramp steps (can be set in heuristic_config)
                 init_state = m.fs._init_adm1_state
                 final_state = m.fs._final_adm1_state
                 
-                for alpha in [0.33, 0.67, 1.0]:
+                # Get ramp steps from config or use default
+                if hasattr(m.fs, "_heuristic_config"):
+                    default_steps = m.fs._heuristic_config.get("ramp_steps", [0.33, 0.67, 1.0])
+                else:
+                    default_steps = [0.33, 0.67, 1.0]
+                
+                for alpha in default_steps:
                     ramped_state = dict(init_state)
                     
                     # Ramp critical components gradually
@@ -948,7 +971,7 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
                     
                     # Solve at this intermediate point
                     results = solver.solve(m, tee=False)
-                    if check_optimal_termination(results):
+                    if pyo.check_optimal_termination(results):
                         logger.info(f"Ramp solve successful at alpha={alpha:.2f}")
                     else:
                         logger.warning(f"Ramp solve failed at alpha={alpha:.2f}, continuing anyway")

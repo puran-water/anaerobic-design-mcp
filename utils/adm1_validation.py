@@ -236,9 +236,19 @@ def calculate_strong_ion_residual(
     alpha_nh4 = 1.0 / (1.0 + 10**(ph - 9.25))
     nh4_mol_m3 = nh_total_mol_m3 * alpha_nh4
     
-    # K+ and Mg2+ (explicit with bio_P=True)
-    k_mol_m3 = _gv("S_K", 0.0) / 0.0391 if _gv("S_K", 0.0) > 0 else 0.0
-    mg_mol_m3 = _gv("S_Mg", 0.0) / 0.0243 if _gv("S_Mg", 0.0) > 0 else 0.0
+    # K+ and Mg2+ handling depends on mode
+    if mode == "watertap":
+        # WaterTAP derives K/Mg from polyphosphate (X_PP) in S_H_cons
+        # This matches the Modified ADM1 property model behavior
+        x_pp_kg_m3 = _gv("X_PP", 0.0)
+        # Stoichiometric factors from WaterTAP (approximate)
+        # X_PP releases K and Mg during hydrolysis
+        k_mol_m3 = x_pp_kg_m3 / 0.30041 if x_pp_kg_m3 > 0 else 0.0
+        mg_mol_m3 = x_pp_kg_m3 / 0.30041 if x_pp_kg_m3 > 0 else 0.0
+    else:
+        # General mode: use explicit S_K and S_Mg values
+        k_mol_m3 = _gv("S_K", 0.0) / 0.0391 if _gv("S_K", 0.0) > 0 else 0.0
+        mg_mol_m3 = _gv("S_Mg", 0.0) / 0.0243 if _gv("S_Mg", 0.0) > 0 else 0.0
     
     # H+ (mol/m³)
     h_mol_m3 = 10**(-ph) * 1000.0
