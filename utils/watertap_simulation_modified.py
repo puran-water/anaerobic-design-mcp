@@ -794,20 +794,18 @@ def _build_low_tss_mbr_flowsheet(
     
     # CRITICAL FIX: Add explicit volumetric anchors for MBR
     # 1) Recovery constraint (perm/inlet)
-    m.fs.mbr_recovery = pyo.Param(initialize=0.2, mutable=True)  # 5Q => 20% to permeate
+    #    Make recovery a Var so we can add one more equality (overall balance)
+    #    while maintaining DOF = 0. Keep it near the design value (0.2) with
+    #    reasonable bounds.
+    m.fs.mbr_recovery = pyo.Var(bounds=(0.05, 0.8), initialize=0.2)
     m.fs.eq_mbr_perm_vol = pyo.Constraint(
         expr=m.fs.MBR.permeate.flow_vol[0] == m.fs.mbr_recovery * m.fs.MBR.inlet.flow_vol[0]
     )
-    # 2) Permeate-flow anchor tied to feed to enforce 1Q effluent
-    #    Combined with the recovery constraint, this implies 5Q at the MBR inlet
-    #    without directly fixing the upstream MBR inlet (avoids DOF=-1).
-    try:
-        m.fs.eq_mbr_perm_anchor = pyo.Constraint(
-            expr=m.fs.MBR.permeate.flow_vol[0] == m.fs.feed.properties[0].flow_vol
-        )
-    except Exception:
-        # If property vars differ or not available, skip anchoring
-        pass
+    # 2) Replace the strict permeate==feed anchor with an overall external
+    #    volumetric balance: MBR permeate + dewatering underflow == feed.
+    #    This permits non-zero waste sludge while keeping the overall volumetric
+    #    balance consistent and avoids the prior infeasibility.
+    #    Note: this constraint is created after the dewatering unit below.
     # Note: Don't add retentate constraint - Separator's mass balance handles it
     # The retentate flow is determined by: inlet = permeate + retentate
     
@@ -932,6 +930,20 @@ def _build_low_tss_mbr_flowsheet(
     tss_in_kg_m3 = _estimate_tss_inlet_kg_m3_low_tss(heuristic_config)
     p_dewat_guess = _compute_p_dewat_from_mass_balance(tss_in_kg_m3, capture_fraction, cake_solids)
     _fix_or_set(m.fs.dewatering.p_dewat, p_dewat_guess, label="dewatering.p_dewat")
+    
+    # Anchor the waste sludge (underflow) to the heuristic daily target to
+    # prevent collapse of the dewatering branch. This works with the overall
+    # volume balance to adjust MBR permeate accordingly (feed = P + U).
+    try:
+        daily_waste_m3d = float(dewatering_config.get("daily_waste_sludge_m3d", 0.0))
+    except Exception:
+        daily_waste_m3d = 0.0
+    if daily_waste_m3d > 0:
+        m.fs.dewatering_target_uf_m3d = pyo.Param(initialize=daily_waste_m3d, mutable=True)
+        m.fs.eq_dewatering_underflow_anchor = pyo.Constraint(
+            expr=m.fs.dewatering.underflow.flow_vol[0]
+                 == (m.fs.dewatering_target_uf_m3d / 86400.0) * pyo.units.m**3 / pyo.units.s
+        )
     # Fix dewatering hydraulics (either HRT or volume); default HRT = 1800 s
     hrt_s = dewatering_config.get("hydraulic_retention_time_s", 1800)
     try:
@@ -961,6 +973,16 @@ def _build_low_tss_mbr_flowsheet(
         property_package=m.fs.props_ADM1,
         inlet_list=["fresh_feed", "mbr_recycle", "centrate_recycle"]
     )
+
+    # Now that both MBR and dewatering underflow ports exist, add the overall
+    # external volumetric balance: P + U == feed
+    try:
+        m.fs.eq_overall_external_vol_balance = pyo.Constraint(
+            expr=(m.fs.MBR.permeate.flow_vol[0] + m.fs.dewatering.underflow.flow_vol[0]
+                  == m.fs.feed.properties[0].flow_vol)
+        )
+    except Exception:
+        pass
     
     # Connect streams to mixer
     m.fs.arc_feed_mixer = Arc(
