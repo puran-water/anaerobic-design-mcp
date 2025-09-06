@@ -23,6 +23,7 @@ import idaes.core.util.scaling as iscale
 from idaes.models.unit_models import Mixer, Separator, Feed
 import idaes.logger as idaeslog
 from idaes.core.util.model_statistics import degrees_of_freedom
+from idaes.core.util.model_diagnostics import DiagnosticsToolbox
 
 # WaterTAP imports - Using MODIFIED ADM1
 from watertap.unit_models.anaerobic_digester import AD
@@ -106,6 +107,48 @@ def _report_dof_breakdown(m: pyo.ConcreteModel, header: str = "") -> int:
     return overall
 
 
+def _log_port_state(port, name: str, level: int = logging.INFO) -> None:
+    """Log a concise snapshot of a Port state for debugging recycle collapse.
+
+    Shows flow (m³/d), temperature (K), pressure (Pa), and a few key concentrations.
+    """
+    try:
+        q = None
+        try:
+            q = pyo.value(pyo.units.convert(port.flow_vol[0], to_units=pyo.units.m**3/pyo.units.day))
+        except Exception:
+            pass
+        t = None
+        p = None
+        try:
+            t = pyo.value(port.temperature[0])
+        except Exception:
+            pass
+        try:
+            p = pyo.value(port.pressure[0])
+        except Exception:
+            pass
+
+        msg = f"{name}: Q={q:.6g} m3/d, T={t if t is not None else 'NA'} K, P={p if p is not None else 'NA'} Pa"
+        logger.log(level, msg)
+
+        # Try to print a few representative concentrations if present
+        sample = ["S_ac", "S_IC", "S_co2", "S_ch4", "X_c"]
+        comps = []
+        try:
+            for c in sample:
+                if (0, c) in port.conc_mass_comp:
+                    val = pyo.value(port.conc_mass_comp[0, c])
+                    comps.append(f"{c}={val:.3g}")
+        except Exception:
+            pass
+        if comps:
+            logger.log(level, f"{name} conc: " + ", ".join(comps))
+    except Exception:
+        # Never let logging raise
+        return
+
+
 def _fix_or_set(obj, val, label: Optional[str] = None):
     """
     Fix a Var or set a (mutable) Param value.
@@ -144,6 +187,12 @@ class SimulationConfig:
     solver: str = "ipopt"
     solver_options: Optional[Dict[str, Any]] = None
     costing_method: str = "WaterTAPCosting"
+    # Optional diagnostics flags
+    enable_diagnostics: bool = False
+    dump_near_zero_vars: bool = False
+    # SD controls
+    sd_iter_lim: int = 20
+    sd_tol: float = 1e-6
     
     def __post_init__(self):
         if self.solver_options is None:
@@ -155,6 +204,74 @@ class SimulationConfig:
                 "tol": 1e-8,
                 "halt_on_ampl_error": "yes"
             }
+
+
+def _log_key_flows(m: pyo.ConcreteModel, header: str = "") -> None:
+    """Log key volumetric flows and split info to diagnose low-flow basin.
+
+    Reports flows (m^3/d) for feed, AD inlet/outlet, MBR inlet/permeate/retentate,
+    and the AD splitter dewatering fraction. Also checks the MBR volumetric
+    recovery constraint residual.
+    """
+    try:
+        def qd(expr):
+            try:
+                return float(pyo.value(pyo.units.convert(expr, to_units=pyo.units.m**3/pyo.units.day)))
+            except Exception:
+                return None
+        msg = []
+        if header:
+            msg.append(f"Flow diagnostics ({header}):")
+        # Feed
+        if hasattr(m.fs, "feed"):
+            msg.append(f"  feed.outlet.Q = {qd(m.fs.feed.outlet.flow_vol[0])}")
+        # Mixer
+        if hasattr(m.fs, "mixer"):
+            try:
+                msg.append(f"  mixer.outlet.Q = {qd(m.fs.mixer.outlet.flow_vol[0])}")
+                if hasattr(m.fs.mixer, "mbr_recycle"):
+                    msg.append(f"  mixer.mbr_recycle.Q = {qd(m.fs.mixer.mbr_recycle.flow_vol[0])}")
+                if hasattr(m.fs.mixer, "centrate_recycle"):
+                    msg.append(f"  mixer.centrate_recycle.Q = {qd(m.fs.mixer.centrate_recycle.flow_vol[0])}")
+            except Exception:
+                pass
+        # AD
+        if hasattr(m.fs, "AD"):
+            msg.append(f"  AD.inlet.Q = {qd(m.fs.AD.inlet.flow_vol[0])}")
+            msg.append(f"  AD.liquid_outlet.Q = {qd(m.fs.AD.liquid_outlet.flow_vol[0])}")
+        # Splitter
+        if hasattr(m.fs, "ad_splitter"):
+            try:
+                f_dewat = None
+                # totalFlow splitter: single fraction Var/Param
+                if (0, "to_dewatering") in m.fs.ad_splitter.split_fraction:
+                    f_dewat = pyo.value(m.fs.ad_splitter.split_fraction[0, "to_dewatering"])
+                msg.append(f"  ad_splitter.to_dewatering fraction = {f_dewat}")
+                # Flows downstream of splitter if available
+                if hasattr(m.fs.ad_splitter, "to_mbr"):
+                    msg.append(f"  ad_splitter.to_mbr.Q = {qd(m.fs.ad_splitter.to_mbr.flow_vol[0])}")
+                if hasattr(m.fs.ad_splitter, "to_dewatering"):
+                    msg.append(f"  ad_splitter.to_dewatering.Q = {qd(m.fs.ad_splitter.to_dewatering.flow_vol[0])}")
+            except Exception:
+                pass
+        # MBR
+        if hasattr(m.fs, "MBR"):
+            msg.append(f"  MBR.inlet.Q = {qd(m.fs.MBR.inlet.flow_vol[0])}")
+            msg.append(f"  MBR.permeate.Q = {qd(m.fs.MBR.permeate.flow_vol[0])}")
+            msg.append(f"  MBR.retentate.Q = {qd(m.fs.MBR.retentate.flow_vol[0])}")
+            try:
+                recov = pyo.value(m.fs.mbr_recovery) if hasattr(m.fs, "mbr_recovery") else None
+                resid = None
+                if hasattr(m.fs, "eq_mbr_perm_vol"):
+                    resid = pyo.value(m.fs.MBR.permeate.flow_vol[0] - m.fs.mbr_recovery * m.fs.MBR.inlet.flow_vol[0])
+                    resid = resid * 86400.0  # convert to m^3/day numerator for readability
+                msg.append(f"  MBR recovery param = {recov}, volumetric residual (m3/d) = {resid}")
+            except Exception:
+                pass
+        logger.info("\n".join(msg))
+    except Exception:
+        # Never let diagnostics fail the run
+        return
 
 
 def build_ad_flowsheet(
@@ -389,6 +506,13 @@ def _build_common_components(
                 )
     except Exception as e:
         logger.debug(f"Feed backfill for missing ADM1 components skipped: {e}")
+
+    # Guard-rail: if density is exposed on state, set a scaling factor to stabilize products with flow
+    try:
+        if hasattr(m.fs.feed.properties[0], "dens_mass"):
+            iscale.set_scaling_factor(m.fs.feed.properties[0].dens_mass, 1e-3)
+    except Exception:
+        pass
     
     # Create AD unit
     m.fs.AD = AD(
@@ -410,6 +534,28 @@ def _build_common_components(
     
     # Fix liquid outlet temperature (assume isothermal)
     _fix_or_set(m.fs.AD.liquid_outlet.temperature, temp_k * pyo.units.K, label="AD.liquid_outlet.temperature")
+    
+    # Ensure strictly positive S_H and good initial pH on AD properties to prevent log10 errors
+    if hasattr(m.fs, "AD") and hasattr(m.fs.AD, "liquid_phase"):
+        # AD is steady-state, so access properties at time 0 directly
+        for side in ("properties_in", "properties_out"):
+            try:
+                blk = getattr(m.fs.AD.liquid_phase, side)[0]
+                if hasattr(blk, "S_H"):
+                    try:
+                        blk.S_H.setlb(1e-14)  # Strict positive lower bound
+                        if blk.S_H.value is None or blk.S_H.value <= 0:
+                            blk.S_H.set_value(1e-7)  # ~pH 7
+                    except Exception:
+                        pass
+                if hasattr(blk, "pH"):
+                    try:
+                        if blk.pH.value is None:
+                            blk.pH.set_value(7.0)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
 
 def _build_high_tss_flowsheet(
@@ -563,10 +709,11 @@ def _build_low_tss_mbr_flowsheet(
         return float(min(max(p, 0.005), 0.9))
     
     # Split AD outlet for MBR and dewatering (parallel configuration)
+    # FIXED: Using totalFlow to prevent zero-mass collapse in recycle
     m.fs.ad_splitter = Separator(
         property_package=m.fs.props_ADM1,
         outlet_list=["to_mbr", "to_dewatering"],
-        split_basis=SplittingType.componentFlow
+        split_basis=SplittingType.totalFlow  # Changed from componentFlow to prevent zero collapse
     )
     
     # Connect AD to splitter
@@ -576,21 +723,33 @@ def _build_low_tss_mbr_flowsheet(
     )
     
     # Calculate split fractions (dewatering pulls waste sludge directly from AD)
-    # Fix: Access nested dewatering config properly
-    daily_waste_m3d = heuristic_config.get("dewatering", {}).get("daily_waste_sludge_m3d", 20.0)
-    feed_flow_m3d = basis_of_design["feed_flow_m3d"]
-    total_ad_flow_m3d = 5 * feed_flow_m3d  # Total flow from AD (including recycles)
-    dewatering_fraction = daily_waste_m3d / total_ad_flow_m3d
+    # Priority: explicit volume_fraction (if provided) > daily_waste_m3d / (expected AD flow)
+    # This avoids tiny implied fractions if heuristics provide a direct volumetric ratio.
+    dewat_cfg = heuristic_config.get("dewatering", {}) if isinstance(heuristic_config, dict) else {}
+    feed_flow_m3d = float(basis_of_design.get("feed_flow_m3d", 1000.0))
+    # Expected AD liquid outlet flow ~ (1 + recirc_ratio) * feed. Default recirc_ratio = 4.0 (5Q operation)
+    recirc_ratio = float(heuristic_config.get("mbr", {}).get("recirc_ratio", 4.0)) if isinstance(heuristic_config, dict) else 4.0
+    total_ad_flow_m3d = (1.0 + recirc_ratio) * feed_flow_m3d
+
+    if dewat_cfg.get("volume_fraction") is not None:
+        dewatering_fraction = float(dewat_cfg.get("volume_fraction"))
+        logger.info(f"Using provided dewatering volume_fraction = {dewatering_fraction}")
+    else:
+        daily_waste_m3d = float(dewat_cfg.get("daily_waste_sludge_m3d", 20.0))
+        # Guard against unphysical fractions
+        dewatering_fraction = max(1e-5, min(0.9, daily_waste_m3d / max(total_ad_flow_m3d, 1e-6)))
+        logger.info(
+            f"Computed dewatering fraction (by volume): {dewatering_fraction} = {daily_waste_m3d}/{total_ad_flow_m3d}"
+        )
     
     # Set split fractions
-    # Important: For componentFlow splitters, fix only ONE outlet fraction per component.
-    # The remaining outlet(s) are determined by the internal sum-to-one constraint.
-    for comp in m.fs.props_ADM1.component_list:
-        _fix_or_set(
-            m.fs.ad_splitter.split_fraction[0, "to_dewatering", comp],
-            dewatering_fraction,
-            label=f"ad_splitter.split_fraction[0,to_dewatering,{comp}]",
-        )
+    # FIXED: For totalFlow splitters, we only set one split fraction, not per-component
+    # The remaining outlet is determined by the internal sum-to-one constraint.
+    _fix_or_set(
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"],
+        dewatering_fraction,
+        label="ad_splitter.split_fraction[0,to_dewatering]",
+    )
     
     # Translator to ASM2D for MBR
     m.fs.translator_AD_ASM = Translator_ADM1_ASM2D(
@@ -608,7 +767,7 @@ def _build_low_tss_mbr_flowsheet(
         destination=m.fs.translator_AD_ASM.inlet
     )
     
-    # MBR as ASM2D separator (simplified)
+    # MBR as ASM2D separator (componentFlow with manual splits)
     m.fs.MBR = Separator(
         property_package=m.fs.props_ASM2D,
         outlet_list=["permeate", "retentate"],
@@ -621,44 +780,70 @@ def _build_low_tss_mbr_flowsheet(
         destination=m.fs.MBR.inlet
     )
     
-    # Configure MBR splits (5Q operation: 20% volumetric recovery)
-    # Following WaterTAP MBRZO convention: water recovery controls volume,
-    # solubles pass through freely (no rejection)
+    # CRITICAL FIX: Add explicit volumetric anchors for MBR
+    # 1) Recovery constraint (perm/inlet)
+    m.fs.mbr_recovery = pyo.Param(initialize=0.2, mutable=True)  # 5Q => 20% to permeate
+    m.fs.eq_mbr_perm_vol = pyo.Constraint(
+        expr=m.fs.MBR.permeate.flow_vol[0] == m.fs.mbr_recovery * m.fs.MBR.inlet.flow_vol[0]
+    )
+    # 2) Inlet setpoint tied to feed to enforce 5Q operation (configurable via recirc_ratio)
+    #    This prevents the entire recycle loop from collapsing to sub-design flows.
+    # TEMPORARILY DISABLED: Creating DOF=-1 over-constraint
+    # m.fs.eq_mbr_inlet_anchor = pyo.Constraint(
+    #     expr=m.fs.MBR.inlet.flow_vol[0] == (1.0 + recirc_ratio) * m.fs.feed.properties[0].flow_vol
+    # )
+    # Note: Don't add retentate constraint - Separator's mass balance handles it
+    # The retentate flow is determined by: inlet = permeate + retentate
     
-    # Get component sets from ASM2D property package
-    # Note: ASM2D typically classifies components by their first letter:
-    # X_* = particulates (should be retained by membrane)
-    # S_* = solubles (pass through membrane freely)
-    # H2O = water (controls volumetric recovery)
+    # Set lower bounds to keep flows strictly positive and away from degenerate solution
+    m.fs.MBR.permeate.flow_vol[0].setlb(1e-4)  # ~0.01 m³/d minimum
+    m.fs.MBR.retentate.flow_vol[0].setlb(1e-3)  # ~0.1 m³/d minimum
+
+    # Optional: enforce minimum MBR inlet/permeate flows to escape low-flow basin
+    # Enabled via heuristic_config['diagnostics']['force_mbr_min_constraints'] = True
+    try:
+        diag = heuristic_config.get("diagnostics", {}) if isinstance(heuristic_config, dict) else {}
+        if bool(diag.get("force_mbr_min_constraints", False)):
+            feed_m3d = float(basis_of_design.get("feed_flow_m3d", 1000.0))
+            # Defaults: 5Q inlet min and 1Q permeate min unless overridden
+            min_in_m3d = float(diag.get("mbr_inlet_min_m3d", 5.0 * feed_m3d))
+            min_perm_m3d = float(diag.get("mbr_permeate_min_m3d", 1.0 * feed_m3d))
+            m.fs.force_mbr_inlet_min = pyo.Constraint(
+                expr=m.fs.MBR.inlet.flow_vol[0] >= (min_in_m3d / 86400.0) * pyo.units.m**3 / pyo.units.s
+            )
+            m.fs.force_mbr_perm_min = pyo.Constraint(
+                expr=m.fs.MBR.permeate.flow_vol[0] >= (min_perm_m3d / 86400.0) * pyo.units.m**3 / pyo.units.s
+            )
+            logger.info(
+                f"Activated MBR min-flow constraints: inlet >= {min_in_m3d} m3/d, permeate >= {min_perm_m3d} m3/d"
+            )
+    except Exception as e:
+        logger.warning(f"Failed to set MBR min-flow constraints: {e}")
     
+    # Configure component splits (H2O unfixed - handled by volumetric constraint)
     for comp in m.fs.props_ASM2D.component_list:
         comp_name = str(comp)
         
         if comp_name == "H2O":
-            # Water - 20% volumetric recovery for 5Q operation
-            _fix_or_set(
-                m.fs.MBR.split_fraction[0, "permeate", comp],
-                0.2,
-                label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )
+            # Leave H2O split unfixed - volumetric constraints determine it
+            m.fs.MBR.split_fraction[0, "permeate", comp].unfix()
+            continue
         elif comp_name.startswith('X_'):
-            # Particulate components - near-complete retention by MBR membrane
+            # Particulate components - near-complete retention
             _fix_or_set(
                 m.fs.MBR.split_fraction[0, "permeate", comp],
                 0.001,
                 label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )  # 99.9% rejection
+            )
         elif comp_name.startswith('S_'):
-            # Soluble components - pass through membrane freely (MBRZO convention)
-            # Use 0.999999 instead of 1.0 to avoid numerical singularities
+            # Soluble components - high transmission
             _fix_or_set(
                 m.fs.MBR.split_fraction[0, "permeate", comp],
                 0.999999,
                 label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )  # ~100% pass through
+            )
         else:
-            # Default for any other components - treat as solubles
-            logger.warning(f"Unexpected component {comp_name} in ASM2D, treating as soluble")
+            # Default - treat as soluble
             _fix_or_set(
                 m.fs.MBR.split_fraction[0, "permeate", comp],
                 0.999999,
@@ -782,6 +967,37 @@ def _build_low_tss_mbr_flowsheet(
         source=m.fs.mixer.outlet,
         destination=m.fs.AD.inlet
     )
+    
+    # DIAGNOSTIC: Add lower bounds to prevent zero-collapse on tear streams
+    # These bounds are intentionally modest and only serve as anti-collapse guards.
+    logger.info("Adding lower bounds to tear stream flows to prevent zero collapse")
+    try:
+        m.fs.mixer.mbr_recycle.flow_vol[0].setlb(1e-3)   # ~86 m³/d minimum for MBR recycle
+        m.fs.mixer.centrate_recycle.flow_vol[0].setlb(1e-5)  # ~0.86 m³/d minimum for centrate
+    except Exception:
+        pass
+
+    # Optional: lower bounds on dewatering inlet/outlet flows to avoid numerical zero
+    try:
+        diag = heuristic_config.get("diagnostics", {}) if isinstance(heuristic_config, dict) else {}
+        if bool(diag.get("anti_collapse_dewatering_lb", True)):
+            # Apply small LBs (~0.1-1 m³/d) in m³/s units
+            small_lb_s = (diag.get("dewatering_lb_m3d", 1.0) / 86400.0) * pyo.units.m**3 / pyo.units.s
+            m.fs.dewatering.inlet.flow_vol[0].setlb(small_lb_s)
+            m.fs.dewatering.overflow.flow_vol[0].setlb(1e-8)  # ~8.64e-4 m³/d
+            m.fs.dewatering.underflow.flow_vol[0].setlb(1e-8)
+    except Exception:
+        # LBs are optional; skip if not supported by property package
+        pass
+
+    # Guard-rail to exclude pathological zero-flow at AD liquid outlet
+    # Physically, AD liquid out should be close to liquid in (gas leaves separately)
+    try:
+        m.fs.ad_no_collapse = pyo.Constraint(
+            expr=m.fs.AD.liquid_outlet.flow_vol[0] >= 0.9 * m.fs.AD.inlet.flow_vol[0]
+        )
+    except Exception:
+        pass
 
 
 def _add_costing(m: pyo.ConcreteModel, costing_method: str) -> None:
@@ -862,7 +1078,95 @@ def _safe_initialize_ad(m: pyo.ConcreteModel) -> None:
     if not hasattr(m.fs, "AD"):
         return
     ad = m.fs.AD
+    
+    # Helper: aggressively ensure unit-level DoF == 0 by fixing AD.inlet
+    def _fix_ad_inlet_from(port_src) -> None:
+        try:
+            # Copy scalar state vars
+            try:
+                ad.inlet.flow_vol[0].fix(pyo.value(port_src.flow_vol[0]))
+            except Exception:
+                pass
+            try:
+                ad.inlet.temperature[0].fix(pyo.value(port_src.temperature[0]))
+            except Exception:
+                pass
+            try:
+                ad.inlet.pressure[0].fix(pyo.value(port_src.pressure[0]))
+            except Exception:
+                pass
+
+            # Copy ions if present
+            try:
+                if hasattr(port_src, "cations") and (0,) in port_src.cations:
+                    ad.inlet.cations[0].fix(pyo.value(port_src.cations[0]))
+            except Exception:
+                pass
+            try:
+                if hasattr(port_src, "anions") and (0,) in port_src.anions:
+                    ad.inlet.anions[0].fix(pyo.value(port_src.anions[0]))
+            except Exception:
+                pass
+
+            # Copy component concentrations (skip H2O)
+            try:
+                comps = list(getattr(m.fs.props_ADM1, "component_list", []))
+                for comp in comps:
+                    cname = str(comp)
+                    if cname == "H2O":
+                        continue
+                    # Guard: only if both ports expose the variable
+                    try:
+                        val = pyo.value(port_src.conc_mass_comp[0, cname])
+                        ad.inlet.conc_mass_comp[0, cname].fix(val)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        except Exception:
+            # Do not fail initialization due to state propagation issues
+            return
+
+    # Helper: unfix AD.inlet after init so flowsheet DoF stays consistent
+    def _unfix_ad_inlet() -> None:
+        try:
+            for v in [ad.inlet.flow_vol[0], ad.inlet.temperature[0], ad.inlet.pressure[0]]:
+                try:
+                    v.unfix()
+                except Exception:
+                    pass
+            # Ions
+            for maybe in (getattr(ad.inlet, "cations", None), getattr(ad.inlet, "anions", None)):
+                try:
+                    if maybe is not None:
+                        maybe[0].unfix()
+                except Exception:
+                    pass
+            # Components
+            try:
+                comps = list(getattr(m.fs.props_ADM1, "component_list", []))
+                for comp in comps:
+                    cname = str(comp)
+                    if cname == "H2O":
+                        continue
+                    try:
+                        ad.inlet.conc_mass_comp[0, cname].unfix()
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        except Exception:
+            return
     try:
+        # Try to make AD unit-level DoF zero by fixing inlet from mixer outlet if available, else feed
+        try:
+            if hasattr(m.fs, "mixer"):
+                _fix_ad_inlet_from(m.fs.mixer.outlet)
+            else:
+                _fix_ad_inlet_from(m.fs.feed.outlet)
+        except Exception:
+            pass
+
         ad.initialize(outlvl=idaeslog.WARNING)
         setattr(ad, "_initialized", True)
         return
@@ -884,10 +1188,14 @@ def _safe_initialize_ad(m: pyo.ConcreteModel) -> None:
         logger.debug(f"Failed to apply fallback feed state: {e}")
 
     try:
+        # Retry init (ensure inlet still fixed)
         ad.initialize(outlvl=idaeslog.WARNING)
         setattr(ad, "_initialized", True)
     except Exception as e:
         logger.warning(f"AD initialize still failing after fallback state: {e}")
+    finally:
+        # Always unfix AD.inlet state after initialization attempts
+        _unfix_ad_inlet()
 
 
 def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: bool = True) -> None:
@@ -915,10 +1223,28 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
             
             # Set up sequential decomposition
             seq = SequentialDecomposition()
-            # Wegstein acceleration is generally more robust for recycle systems
-            seq.options.tear_method = "Wegstein"
-            seq.options.iterLim = 50  # Max iterations
-            seq.options.tol = 1e-5  # Convergence tolerance (option name is 'tol')
+            # Use Direct method to avoid Wegstein overshoot
+            seq.options.tear_method = "Direct"
+            # Do multiple direct iterations to substantially close tear streams
+            # before the final global solve, avoiding large arc mismatches.
+            try:
+                iter_lim = int(getattr(m.fs, "config", None).sd_iter_lim) if hasattr(m.fs, "config") else 20
+            except Exception:
+                iter_lim = 20
+            try:
+                tol_val = float(getattr(m.fs, "config", None).sd_tol) if hasattr(m.fs, "config") else 1e-6
+            except Exception:
+                tol_val = 1e-6
+            seq.options.iterLim = iter_lim
+            seq.options.tol = tol_val  # Convergence tolerance (option name is 'tol')
+            
+            # If the environment forces Wegstein elsewhere, neutralize acceleration
+            # to behave like Direct (for safety against negative tear updates)
+            try:
+                seq.options.accel_min = 0.0
+                seq.options.accel_max = 0.0
+            except Exception:
+                pass
             
             # Set tear streams using available API
             try:
@@ -931,6 +1257,14 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
                     setattr(seq, "tear_set", tear_arcs)
             except Exception as e:
                 logger.debug(f"Unable to set explicit tear set: {e}")
+
+            # Important: Build the SD graph BEFORE registering tear guesses.
+            # Pyomo's SequentialDecomposition expects create_graph() first so that
+            # set_guesses_for() can associate guesses with the correct Ports.
+            try:
+                seq.create_graph(m)
+            except Exception as e:
+                logger.debug(f"SequentialDecomposition.create_graph failed or not needed: {e}")
             
             # Pre-initialize upstream units and AD to improve robustness
             try:
@@ -942,77 +1276,177 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
             except Exception as e:
                 logger.debug(f"Pre-initialization before SD encountered an issue: {e}")
 
+            # Helper: build guess dicts directly from the curated init/final ADM1 state
+            # rather than reading property Vars (avoids uninitialized/negative values)
+            def _build_guess_dict_from_state(state: Dict[str, float], Q: float,
+                                             conc_scale_part: float = 0.8,
+                                             conc_scale_sol: float = 0.8) -> Dict[str, Any]:
+                # IMPORTANT: Provide plain numerics (no Pyomo units) in guesses.
+                # All values here use native units of corresponding Vars (m^3/s, K, Pa, kg/m^3, kmol/m^3).
+                guesses: Dict[str, Any] = {
+                    "flow_vol": {0: float(Q)},
+                    "temperature": {0: 308.15},
+                    "pressure": {0: 101325.0},
+                }
+                # Ions (kmol/m3) if available in state; fall back to safe defaults
+                s_cat = state.get("S_cat", 0.04)  # Default from fixed_adm1_state
+                s_an = state.get("S_an", 0.026)   # Default from fixed_adm1_state
+                try:
+                    if s_cat is None and hasattr(m.fs.feed.properties[0], "cations"):
+                        feed_cat = pyo.value(m.fs.feed.properties[0].cations)
+                        if feed_cat is not None and feed_cat > 0:
+                            s_cat = float(feed_cat)
+                    if s_an is None and hasattr(m.fs.feed.properties[0], "anions"):
+                        feed_an = pyo.value(m.fs.feed.properties[0].anions)
+                        if feed_an is not None and feed_an > 0:
+                            s_an = float(feed_an)
+                except Exception:
+                    pass
+                # Always provide positive ion values
+                guesses["cations"] = {0: float(max(s_cat if s_cat else 0.04, 1e-6))}
+                guesses["anions"] = {0: float(max(s_an if s_an else 0.026, 1e-6))}
+                # Concentrations from state dict; clamp to nonnegative
+                conc_map: Dict[Any, float] = {}
+                for comp in m.fs.props_ADM1.component_list:
+                    cname = str(comp)
+                    if cname == "H2O":
+                        continue
+                    # Skip ions - they're handled as cations/anions above
+                    if cname in ["S_cat", "S_an"]:
+                        continue
+                    val = state.get(cname, None)
+                    if val is None:
+                        # If state didn't include this component, try feed conc as fallback
+                        try:
+                            feed_val = pyo.value(m.fs.feed.properties[0].conc_mass_comp[comp])
+                            # Only use if it's a valid positive number
+                            if feed_val is not None and feed_val > 0:
+                                val = float(feed_val)
+                            else:
+                                val = 1e-6  # Safe default
+                        except Exception:
+                            val = 1e-6  # Safe default
+                    # Ensure val is positive before scaling
+                    val = max(float(val), 1e-10)
+                    scale = conc_scale_part if cname.startswith("X_") else conc_scale_sol
+                    conc_map[(0, comp)] = float(max(val * scale, 1e-10))
+                if conc_map:
+                    guesses["conc_mass_comp"] = conc_map
+                return guesses
+
             # Set initial guesses for tear streams to avoid zero-flow convergence
             try:
                 # Set heuristic tear selection for better convergence
                 seq.options.select_tear_method = "heuristic"
-                
+
                 # Get feed flow for scaling guesses
                 feed_Q = pyo.value(m.fs.feed.properties[0].flow_vol)  # m³/s
                 logger.info(f"Feed flow for tear initialization: {feed_Q:.6f} m³/s")
-                
-                # For low TSS MBR configuration - set values directly on tear stream sources
-                if hasattr(m.fs, 'MBR') and hasattr(m.fs, 'translator_ASM_AD_mbr'):
-                    # The tear stream is from translator outlet (MBR retentate after translation back to ADM1)
-                    # Set reasonable initial guesses based on expected recycle
-                    Q_recycle_guess = 4.0 * feed_Q  # Expect 4Q recycle for 5Q operation
-                    
-                    # Set the value directly on the translator outlet (source of tear arc)
-                    translator_outlet = m.fs.translator_ASM_AD_mbr.outlet
-                    translator_outlet.flow_vol[0].set_value(Q_recycle_guess)
-                    logger.info(f"Set MBR recycle tear guess directly: {Q_recycle_guess:.6f} m³/s")
-                    
-                    # Also set reasonable temperature and pressure
-                    translator_outlet.temperature[0].set_value(308.15)  # 35°C
-                    translator_outlet.pressure[0].set_value(101325)  # 1 atm
-                    
-                    # Set component concentrations similar to feed (will be refined by SD)
-                    if hasattr(m.fs.feed.properties[0], 'conc_mass_comp'):
-                        for comp in m.fs.props_ADM1.component_list:
-                            try:
-                                feed_conc = pyo.value(m.fs.feed.properties[0].conc_mass_comp[comp])
-                                translator_outlet.conc_mass_comp[0, comp].set_value(feed_conc * 0.8)  # Slightly diluted
-                            except:
-                                pass  # Some components might not be settable
-                
+
+                # For low TSS MBR configuration - set guesses on mixer inlet ports (destination of tear arcs)
+                if hasattr(m.fs, 'MBR') and hasattr(m.fs, 'translator_ASM_AD_mbr') and hasattr(m.fs, 'mixer'):
+                    # Expect ~4Q recycle for 5Q operation
+                    Q_recycle_guess = 4.0 * feed_Q
+                    mbr_recycle_port = m.fs.mixer.mbr_recycle
+                    # Use physically correct concentration factors:
+                    # Particulates: 5/4 = 1.25 (5Q in, 4Q return, 99.9% rejection)
+                    # Solubles: 1.0 (pass through freely, same concentration everywhere)
+                    # Build from curated init state if available, else fallback to feed-based
+                    init_state = getattr(m.fs, "_init_adm1_state", {}) or {}
+                    if init_state:
+                        mbr_guess = _build_guess_dict_from_state(init_state, Q_recycle_guess,
+                                                                 conc_scale_part=1.25, conc_scale_sol=1.0)
+                    else:
+                        # Last resort fallback
+                        mbr_guess = _build_guess_dict_from_state({}, Q_recycle_guess,
+                                                                 conc_scale_part=1.25, conc_scale_sol=1.0)
+                    # Register guesses with SD so they persist across unit initialization
+                    seq.set_guesses_for(mbr_recycle_port, mbr_guess)
+                    logger.info(
+                        f"Registered MBR recycle tear guess via SD: {Q_recycle_guess:.6f} m³/s"
+                    )
+
                 # For dewatering centrate recycle
-                if hasattr(m.fs, 'dewatering') and hasattr(m.fs, 'translator_centrate_AD'):
+                if hasattr(m.fs, 'dewatering') and hasattr(m.fs, 'translator_centrate_AD') and hasattr(m.fs, 'mixer'):
                     p_dewat = pyo.value(m.fs.dewatering.p_dewat)
-                    # Centrate flow based on dewatering split
-                    # ~8% of 5Q goes to dewatering, centrate is (1-p_dewat) of that
+                    # Heuristic: ~8% of 5Q goes to dewatering, centrate is (1-p_dewat) of that
                     Q_to_dewat = 0.08 * 5.0 * feed_Q
                     Q_centrate_guess = (1 - p_dewat) * Q_to_dewat
-                    
-                    # Set directly on translator outlet
-                    centrate_outlet = m.fs.translator_centrate_AD.outlet
-                    centrate_outlet.flow_vol[0].set_value(Q_centrate_guess)
-                    logger.info(f"Set centrate recycle tear guess directly: {Q_centrate_guess:.6f} m³/s")
-                    
-                    # Set T, P
-                    centrate_outlet.temperature[0].set_value(308.15)
-                    centrate_outlet.pressure[0].set_value(101325)
-                    
-                    # Set dilute concentrations for centrate
-                    if hasattr(m.fs.feed.properties[0], 'conc_mass_comp'):
-                        for comp in m.fs.props_ADM1.component_list:
-                            try:
-                                feed_conc = pyo.value(m.fs.feed.properties[0].conc_mass_comp[comp])
-                                # Centrate is more dilute, especially for particulates
-                                if str(comp).startswith('X_'):
-                                    centrate_outlet.conc_mass_comp[0, comp].set_value(feed_conc * 0.05)
-                                else:
-                                    centrate_outlet.conc_mass_comp[0, comp].set_value(feed_conc * 0.5)
-                            except:
-                                pass
-                
-                logger.info("Tear stream initialization complete")
-                        
+                    centrate_port = m.fs.mixer.centrate_recycle
+                    # Centrate has very low particulates (95% capture) but moderate solubles
+                    init_state = getattr(m.fs, "_init_adm1_state", {}) or {}
+                    if init_state:
+                        cent_guess = _build_guess_dict_from_state(init_state, Q_centrate_guess,
+                                                                  conc_scale_part=0.01, conc_scale_sol=0.2)
+                    else:
+                        cent_guess = _build_guess_dict_from_state({}, Q_centrate_guess,
+                                                                  conc_scale_part=0.01, conc_scale_sol=0.2)
+                    seq.set_guesses_for(centrate_port, cent_guess)
+                    logger.info(
+                        f"Registered centrate recycle tear guess via SD: {Q_centrate_guess:.6f} m³/s"
+                    )
+
+                logger.info("Tear stream initialization registered with SD")
+
             except Exception as e:
-                logger.warning(f"Could not set recycle tear guesses: {e}")
+                logger.warning(f"Could not register recycle tear guesses: {e}")
                 # Continue anyway - initialization may still work
             
+            # Optional: quick snapshot before SD
+            try:
+                _log_port_state(m.fs.feed.outlet, "feed.outlet (pre-SD)")
+                if hasattr(m.fs, 'mixer'):
+                    if hasattr(m.fs.mixer, 'mbr_recycle'):
+                        _log_port_state(m.fs.mixer.mbr_recycle, "mixer.mbr_recycle (pre-SD)")
+                    if hasattr(m.fs.mixer, 'centrate_recycle'):
+                        _log_port_state(m.fs.mixer.centrate_recycle, "mixer.centrate_recycle (pre-SD)")
+            except Exception:
+                pass
+
+            # Proactively propagate known upstream states to downstream units (non-tear arcs)
+            # to avoid zero-flow initialization in units outside the pre-init path.
+            try:
+                # Common arcs present in both configurations
+                if hasattr(m.fs, 'arc_AD_translator'):
+                    propagate_state(m.fs.arc_AD_translator)
+                if hasattr(m.fs, 'arc_translator_dewatering'):
+                    propagate_state(m.fs.arc_translator_dewatering)
+                if hasattr(m.fs, 'arc_dewatering_translator'):
+                    propagate_state(m.fs.arc_dewatering_translator)
+
+                # Low TSS MBR configuration specific arcs
+                if hasattr(m.fs, 'arc_AD_splitter'):
+                    propagate_state(m.fs.arc_AD_splitter)
+                if hasattr(m.fs, 'arc_splitter_translator'):
+                    propagate_state(m.fs.arc_splitter_translator)
+                if hasattr(m.fs, 'arc_translator_MBR'):
+                    propagate_state(m.fs.arc_translator_MBR)
+                if hasattr(m.fs, 'arc_MBR_translator'):
+                    propagate_state(m.fs.arc_MBR_translator)
+                if hasattr(m.fs, 'arc_centrate_translator'):
+                    propagate_state(m.fs.arc_centrate_translator)
+            except Exception as e:
+                logger.debug(f"Optional pre-SD propagate_state skipped: {e}")
+
             # Run decomposition with unit initialization callback
             seq.run(m, _init_unit_callback)
+
+            # Snapshot of key flows post-initialization for diagnostics
+            try:
+                _log_key_flows(m, header="post-initialize")
+            except Exception:
+                pass
+
+            # Optional diagnostics after SD
+            try:
+                if hasattr(m.fs, 'config') and getattr(m.fs.config, 'enable_diagnostics', False):
+                    dt = DiagnosticsToolbox(m)
+                    dt.report_structural_issues()
+                    dt.report_numerical_issues()
+                    if getattr(m.fs.config, 'dump_near_zero_vars', False):
+                        dt.display_variables_with_value_near_zero()
+            except Exception as e:
+                logger.debug(f"Diagnostics toolbox (post-SD) skipped: {e}")
 
             # After initialization, gradually ramp to final state
             if hasattr(m.fs, "_final_adm1_state") and hasattr(m.fs, "_init_adm1_state"):
@@ -1063,6 +1497,21 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
                 # Fallback to direct application if no init state
                 logger.info("Applying final feed state after initialization (no ramping)")
                 _apply_feed_state(m, m.fs._final_adm1_state)
+
+            # Optional: snapshot after SD
+            try:
+                if hasattr(m.fs, 'AD'):
+                    _log_port_state(m.fs.AD.inlet, "AD.inlet (post-SD)")
+                    _log_port_state(m.fs.AD.liquid_outlet, "AD.liquid_outlet (post-SD)")
+                    _log_port_state(m.fs.AD.vapor_outlet, "AD.vapor_outlet (post-SD)")
+                if hasattr(m.fs, 'MBR'):
+                    _log_port_state(m.fs.MBR.permeate, "MBR.permeate (post-SD)")
+                    _log_port_state(m.fs.MBR.retentate, "MBR.retentate (post-SD)")
+                if hasattr(m.fs, 'dewatering'):
+                    _log_port_state(m.fs.dewatering.overflow, "dewatering.overflow (post-SD)")
+                    _log_port_state(m.fs.dewatering.underflow, "dewatering.underflow (post-SD)")
+            except Exception:
+                pass
 
             logger.info("Sequential decomposition completed")
             return
@@ -1134,7 +1583,18 @@ def solve_flowsheet(
     """
     solver = get_solver()
     
-    # Apply solver options from config if available
+    # Add robust solver options for difficult ADM1 problems with pH calculations
+    solver.options["mu_strategy"] = "adaptive"
+    solver.options["mu_init"] = 1e-6                    # Small barrier parameter
+    solver.options["bound_push"] = 1e-6                 # More conservative bound push
+    solver.options["bound_frac"] = 0.01                 # Fraction of bound distance
+    solver.options["bound_relax_factor"] = 0            # No bound relaxation
+    
+    # Warm-start options for robustness on re-solves
+    solver.options["warm_start_init_point"] = "yes"
+    solver.options["warm_start_bound_push"] = 1e-8
+    
+    # Apply solver options from config if available (may override defaults)
     if hasattr(m.fs, 'config') and hasattr(m.fs.config, 'solver_options') and m.fs.config.solver_options:
         for key, value in m.fs.config.solver_options.items():
             solver.options[key] = value
@@ -1143,8 +1603,17 @@ def solve_flowsheet(
     solve_logger = idaeslog.getSolveLogger("watertap.ad")
     with idaeslog.solver_log(solve_logger, idaeslog.INFO) as slc:
         results = solver.solve(m, tee=slc.tee if tee else False)
-    
+
     if not pyo.check_optimal_termination(results):
+        # Optional diagnostics on solve failure
+        try:
+            if hasattr(m.fs, 'config') and getattr(m.fs.config, 'enable_diagnostics', False):
+                dt = DiagnosticsToolbox(m)
+                dt.report_structural_issues()
+                dt.report_numerical_issues()
+                dt.display_infeasible_constraints()
+        except Exception as e:
+            logger.debug(f"Diagnostics toolbox (solve failure) skipped: {e}")
         if raise_on_failure:
             raise RuntimeError(f"Solve failed: {results.solver.termination_condition}")
         else:
@@ -1253,9 +1722,44 @@ def simulate_ad_system(
         
         # Build flowsheet based on configuration
         flowsheet_type = heuristic_config.get("flowsheet_type", "high_tss")
-        
+
         # Build common components (feed, AD, property packages)
         _build_common_components(m, basis_of_design, adm1_state, heuristic_config)
+
+        # Attach a default SimulationConfig to hold options and diagnostics toggles
+        try:
+            m.fs.config = SimulationConfig()
+            # Allow users to toggle diagnostics via heuristic_config if provided
+            diag_cfg = heuristic_config.get("diagnostics", {}) if isinstance(heuristic_config, dict) else {}
+            if isinstance(diag_cfg, dict):
+                m.fs.config.enable_diagnostics = bool(diag_cfg.get("enable", False))
+                m.fs.config.dump_near_zero_vars = bool(diag_cfg.get("dump_near_zero", False))
+                # SD tuning overrides
+                if "sd_iter_lim" in diag_cfg:
+                    try:
+                        m.fs.config.sd_iter_lim = int(diag_cfg.get("sd_iter_lim"))
+                    except Exception:
+                        pass
+                if "sd_tol" in diag_cfg:
+                    try:
+                        m.fs.config.sd_tol = float(diag_cfg.get("sd_tol"))
+                    except Exception:
+                        pass
+            
+            # Also check simulation config for solver options and SD settings
+            sim_cfg = heuristic_config.get("simulation", {}) if isinstance(heuristic_config, dict) else {}
+            if isinstance(sim_cfg, dict):
+                if "solver_options" in sim_cfg and isinstance(sim_cfg["solver_options"], dict):
+                    m.fs.config.solver_options = sim_cfg["solver_options"]
+                if "sd_iter_lim" in sim_cfg:
+                    try:
+                        m.fs.config.sd_iter_lim = int(sim_cfg.get("sd_iter_lim"))
+                    except Exception:
+                        pass
+                if "use_sd" in sim_cfg:
+                    m.fs.config.use_sd = bool(sim_cfg.get("use_sd", True))
+        except Exception:
+            pass
         
         # Build configuration-specific flowsheet
         if flowsheet_type == "low_tss_mbr":
@@ -1280,12 +1784,105 @@ def simulate_ad_system(
         # Apply default scaling factors for improved numerical stability
         try:
             iscale.calculate_scaling_factors(m)
+            
+            # Apply comprehensive scaling to ALL ADM1 state blocks
+            # This is critical for convergence with components spanning 12 orders of magnitude
+            def apply_adm1_scaling(blk):
+                """Apply scaling to any ADM1 state block"""
+                if not blk:
+                    return
+                    
+                # S_H scaling (pH ~7 means S_H ~1e-7)
+                if hasattr(blk, "S_H"):
+                    iscale.set_scaling_factor(blk.S_H, 1e8)
+                    blk.S_H.setlb(1e-14)  # Strict lower bound
+                    blk.S_H.setub(1e-3)   # Upper bound to prevent pH excursions
+                
+                # Ion scaling
+                if hasattr(blk, "cations"):
+                    iscale.set_scaling_factor(blk.cations, 1e2)
+                if hasattr(blk, "anions"):
+                    iscale.set_scaling_factor(blk.anions, 1e2)
+                
+                # Concentration scaling for extreme components
+                if hasattr(blk, "conc_mass_comp"):
+                    # Dissolved gases - need extreme scaling
+                    for comp, factor in [("S_h2", 1e5), ("S_ch4", 1e5), ("S_co2", 1e3)]:
+                        if (0, comp) in blk.conc_mass_comp:
+                            iscale.set_scaling_factor(blk.conc_mass_comp[0, comp], factor)
+            
+            # Apply to all relevant state blocks
+            t = 0  # Steady-state time index
+            
+            # Feed
+            if hasattr(m.fs, "feed") and hasattr(m.fs.feed, "properties"):
+                apply_adm1_scaling(m.fs.feed.properties[t])
+            
+            # Mixer and its ports
+            if hasattr(m.fs, "mixer"):
+                for port in ["outlet", "mixed_state", "mbr_recycle", "centrate_recycle", "feed_inlet"]:
+                    if hasattr(m.fs.mixer, port):
+                        try:
+                            port_obj = getattr(m.fs.mixer, port)
+                            if hasattr(port_obj, "__getitem__"):
+                                apply_adm1_scaling(port_obj[t])
+                        except:
+                            pass
+            
+            # AD unit
+            if hasattr(m.fs, "AD") and hasattr(m.fs.AD, "liquid_phase"):
+                for side in ["properties_in", "properties_out"]:
+                    if hasattr(m.fs.AD.liquid_phase, side):
+                        apply_adm1_scaling(getattr(m.fs.AD.liquid_phase, side)[t])
+                # Also AD inlet/outlet ports
+                for port in ["inlet", "liquid_outlet"]:
+                    if hasattr(m.fs.AD, port):
+                        try:
+                            port_obj = getattr(m.fs.AD, port)
+                            if hasattr(port_obj, "__getitem__"):
+                                apply_adm1_scaling(port_obj[t])
+                        except:
+                            pass
+            
+            # AD splitter
+            if hasattr(m.fs, "ad_splitter"):
+                for port in ["mixed_state", "to_mbr_state", "to_dewatering_state"]:
+                    if hasattr(m.fs.ad_splitter, port):
+                        try:
+                            port_obj = getattr(m.fs.ad_splitter, port)
+                            if hasattr(port_obj, "__getitem__"):
+                                apply_adm1_scaling(port_obj[t])
+                        except:
+                            pass
+            
+            # Translators (only ADM1 side)
+            for translator in ["translator_AD_ASM", "translator_ASM_AD_mbr", "translator_centrate_AD"]:
+                if hasattr(m.fs, translator):
+                    trans_obj = getattr(m.fs, translator)
+                    # Only apply to properties_in for ADM1->ASM2D translators
+                    # and properties_out for ASM2D->ADM1 translators
+                    if "AD_ASM" in translator and hasattr(trans_obj, "properties_in"):
+                        try:
+                            apply_adm1_scaling(trans_obj.properties_in[t])
+                        except:
+                            pass
+                    elif ("ASM_AD" in translator or translator.endswith("_AD")) and hasattr(trans_obj, "properties_out"):
+                        try:
+                            apply_adm1_scaling(trans_obj.properties_out[t])
+                        except:
+                            pass
+            
+            logger.info("Applied comprehensive ADM1 scaling to all state blocks")
+                
         except Exception as e:
             logger.debug(f"Scaling factor calculation skipped: {e}")
 
         # Initialize flowsheet with SequentialDecomposition for recycles
         logger.info("Initializing flowsheet...")
-        initialize_flowsheet(m, use_sequential_decomposition=True)
+        # Check if use_sd was set in config, default to True
+        use_sd = getattr(m.fs.config, 'use_sd', True) if hasattr(m.fs, 'config') else True
+        logger.info(f"Sequential Decomposition: {'Enabled' if use_sd else 'Disabled'}")
+        initialize_flowsheet(m, use_sequential_decomposition=use_sd)
         
         if initialize_only:
             return {
@@ -1295,6 +1892,31 @@ def simulate_ad_system(
                 "message": "Model built and initialized successfully"
             }
         
+        # Optional: seed MBR flows to target 5Q/1Q as initial values (not fixed)
+        try:
+            diag_cfg = heuristic_config.get("diagnostics", {}) if isinstance(heuristic_config, dict) else {}
+            if bool(diag_cfg.get("seed_force_mbr", False)) and hasattr(m.fs, "MBR"):
+                feed_m3d = float(basis_of_design.get("feed_flow_m3d", 1000.0))
+                q_in = (5.0 * feed_m3d) / 86400.0
+                q_perm = (1.0 * feed_m3d) / 86400.0
+                try:
+                    m.fs.MBR.inlet.flow_vol[0].set_value(q_in * pyo.units.m**3 / pyo.units.s)
+                    m.fs.MBR.permeate.flow_vol[0].set_value(q_perm * pyo.units.m**3 / pyo.units.s)
+                    # Also seed recycle to ~4Q at the mixer port if present
+                    if hasattr(m.fs.mixer, "mbr_recycle"):
+                        m.fs.mixer.mbr_recycle.flow_vol[0].set_value((4.0 * feed_m3d / 86400.0) * pyo.units.m**3 / pyo.units.s)
+                    logger.info(f"Seeded MBR flows: inlet≈{5.0*feed_m3d} m3/d, permeate≈{feed_m3d} m3/d")
+                except Exception as e:
+                    logger.debug(f"Seeding MBR initial flows skipped: {e}")
+        except Exception:
+            pass
+
+        # Log a pre-solve snapshot
+        try:
+            _log_key_flows(m, header="pre-solve")
+        except Exception:
+            pass
+
         # Solve flowsheet
         logger.info("Solving flowsheet...")
         solve_results = solve_flowsheet(m, tee=tee, raise_on_failure=False)
@@ -1350,6 +1972,11 @@ def simulate_ad_system(
         if flowsheet_type == "low_tss_mbr" and "mbr_permeate_flow_m3d" in solve_results:
             results["operational_results"]["mbr_permeate_flow_m3d"] = solve_results["mbr_permeate_flow_m3d"]
         
+        # Post-solve flow snapshot for final diagnostics
+        try:
+            _log_key_flows(m, header="post-solve")
+        except Exception:
+            pass
         logger.info(f"Simulation completed with status: {results['status']}")
         
         return results
