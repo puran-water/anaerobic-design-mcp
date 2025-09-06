@@ -553,6 +553,15 @@ def _build_low_tss_mbr_flowsheet(
     """
     logger.info("Building low TSS MBR configuration with parallel dewatering")
     
+    # Helper function for dewatering calculation
+    def _compute_p_dewat_from_mass_balance(tss_in_kg_m3: float, capture_fr: float, cake_solids_frac: float) -> float:
+        # Mass balance: Q_u/Q_in = (capture*TSS_in) / TSS_cake, where TSS_cake = cake_frac * rho
+        rho_sludge = 1000.0  # kg/m³, assume near water density
+        tss_cake = max(1e-6, cake_solids_frac * rho_sludge)
+        p = (max(0.0, capture_fr) * max(1e-9, tss_in_kg_m3)) / tss_cake
+        # Clamp to reasonable bounds to avoid infeasible soluble splits
+        return float(min(max(p, 0.005), 0.9))
+    
     # Split AD outlet for MBR and dewatering (parallel configuration)
     m.fs.ad_splitter = Separator(
         property_package=m.fs.props_ADM1,
@@ -612,42 +621,49 @@ def _build_low_tss_mbr_flowsheet(
         destination=m.fs.MBR.inlet
     )
     
-    # Configure MBR splits (5Q operation: 20% to permeate)
-    # Data-driven approach using property package component classification
+    # Configure MBR splits (5Q operation: 20% volumetric recovery)
+    # Following WaterTAP MBRZO convention: water recovery controls volume,
+    # solubles pass through freely (no rejection)
     
     # Get component sets from ASM2D property package
     # Note: ASM2D typically classifies components by their first letter:
     # X_* = particulates (should be retained by membrane)
-    # S_* = solubles (partially pass through membrane)
+    # S_* = solubles (pass through membrane freely)
+    # H2O = water (controls volumetric recovery)
     
     for comp in m.fs.props_ASM2D.component_list:
         comp_name = str(comp)
         
-        if comp_name.startswith('X_'):
-            # Particulate components - near-complete retention by MBR membrane
-            _fix_or_set(
-                m.fs.MBR.split_fraction[0, "permeate", comp],
-                0.001,
-                label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )  # 0.1% to permeate
-            # Do not fix retentate fraction; let sum-to-one constraint determine it
-        elif comp_name.startswith('S_'):
-            # Soluble components - partially pass through membrane (5Q operation = 20% recovery)
-            _fix_or_set(
-                m.fs.MBR.split_fraction[0, "permeate", comp],
-                0.2,
-                label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )  # 20% to permeate
-            # Do not fix retentate fraction; let sum-to-one constraint determine it
-        else:
-            # Default for any other components (shouldn't happen in ASM2D)
-            logger.warning(f"Unexpected component {comp_name} in ASM2D, using soluble splits")
+        if comp_name == "H2O":
+            # Water - 20% volumetric recovery for 5Q operation
             _fix_or_set(
                 m.fs.MBR.split_fraction[0, "permeate", comp],
                 0.2,
                 label=f"MBR.split_fraction[0,permeate,{comp}]",
             )
-            # Do not fix retentate fraction; let sum-to-one constraint determine it
+        elif comp_name.startswith('X_'):
+            # Particulate components - near-complete retention by MBR membrane
+            _fix_or_set(
+                m.fs.MBR.split_fraction[0, "permeate", comp],
+                0.001,
+                label=f"MBR.split_fraction[0,permeate,{comp}]",
+            )  # 99.9% rejection
+        elif comp_name.startswith('S_'):
+            # Soluble components - pass through membrane freely (MBRZO convention)
+            # Use 0.999999 instead of 1.0 to avoid numerical singularities
+            _fix_or_set(
+                m.fs.MBR.split_fraction[0, "permeate", comp],
+                0.999999,
+                label=f"MBR.split_fraction[0,permeate,{comp}]",
+            )  # ~100% pass through
+        else:
+            # Default for any other components - treat as solubles
+            logger.warning(f"Unexpected component {comp_name} in ASM2D, treating as soluble")
+            _fix_or_set(
+                m.fs.MBR.split_fraction[0, "permeate", comp],
+                0.999999,
+                label=f"MBR.split_fraction[0,permeate,{comp}]",
+            )
     
     # Translator for MBR retentate back to ADM1
     m.fs.translator_ASM_AD_mbr = Translator_ASM2d_ADM1(
@@ -926,8 +942,74 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
             except Exception as e:
                 logger.debug(f"Pre-initialization before SD encountered an issue: {e}")
 
-            # Optionally set initial guesses for tear streams
-            # Example: seq.set_guesses_for(m.fs.AD.inlet, {m.fs.AD.inlet.flow_vol: 1.0, ...})
+            # Set initial guesses for tear streams to avoid zero-flow convergence
+            try:
+                # Set heuristic tear selection for better convergence
+                seq.options.select_tear_method = "heuristic"
+                
+                # Get feed flow for scaling guesses
+                feed_Q = pyo.value(m.fs.feed.properties[0].flow_vol)  # m³/s
+                logger.info(f"Feed flow for tear initialization: {feed_Q:.6f} m³/s")
+                
+                # For low TSS MBR configuration - set values directly on tear stream sources
+                if hasattr(m.fs, 'MBR') and hasattr(m.fs, 'translator_ASM_AD_mbr'):
+                    # The tear stream is from translator outlet (MBR retentate after translation back to ADM1)
+                    # Set reasonable initial guesses based on expected recycle
+                    Q_recycle_guess = 4.0 * feed_Q  # Expect 4Q recycle for 5Q operation
+                    
+                    # Set the value directly on the translator outlet (source of tear arc)
+                    translator_outlet = m.fs.translator_ASM_AD_mbr.outlet
+                    translator_outlet.flow_vol[0].set_value(Q_recycle_guess)
+                    logger.info(f"Set MBR recycle tear guess directly: {Q_recycle_guess:.6f} m³/s")
+                    
+                    # Also set reasonable temperature and pressure
+                    translator_outlet.temperature[0].set_value(308.15)  # 35°C
+                    translator_outlet.pressure[0].set_value(101325)  # 1 atm
+                    
+                    # Set component concentrations similar to feed (will be refined by SD)
+                    if hasattr(m.fs.feed.properties[0], 'conc_mass_comp'):
+                        for comp in m.fs.props_ADM1.component_list:
+                            try:
+                                feed_conc = pyo.value(m.fs.feed.properties[0].conc_mass_comp[comp])
+                                translator_outlet.conc_mass_comp[0, comp].set_value(feed_conc * 0.8)  # Slightly diluted
+                            except:
+                                pass  # Some components might not be settable
+                
+                # For dewatering centrate recycle
+                if hasattr(m.fs, 'dewatering') and hasattr(m.fs, 'translator_centrate_AD'):
+                    p_dewat = pyo.value(m.fs.dewatering.p_dewat)
+                    # Centrate flow based on dewatering split
+                    # ~8% of 5Q goes to dewatering, centrate is (1-p_dewat) of that
+                    Q_to_dewat = 0.08 * 5.0 * feed_Q
+                    Q_centrate_guess = (1 - p_dewat) * Q_to_dewat
+                    
+                    # Set directly on translator outlet
+                    centrate_outlet = m.fs.translator_centrate_AD.outlet
+                    centrate_outlet.flow_vol[0].set_value(Q_centrate_guess)
+                    logger.info(f"Set centrate recycle tear guess directly: {Q_centrate_guess:.6f} m³/s")
+                    
+                    # Set T, P
+                    centrate_outlet.temperature[0].set_value(308.15)
+                    centrate_outlet.pressure[0].set_value(101325)
+                    
+                    # Set dilute concentrations for centrate
+                    if hasattr(m.fs.feed.properties[0], 'conc_mass_comp'):
+                        for comp in m.fs.props_ADM1.component_list:
+                            try:
+                                feed_conc = pyo.value(m.fs.feed.properties[0].conc_mass_comp[comp])
+                                # Centrate is more dilute, especially for particulates
+                                if str(comp).startswith('X_'):
+                                    centrate_outlet.conc_mass_comp[0, comp].set_value(feed_conc * 0.05)
+                                else:
+                                    centrate_outlet.conc_mass_comp[0, comp].set_value(feed_conc * 0.5)
+                            except:
+                                pass
+                
+                logger.info("Tear stream initialization complete")
+                        
+            except Exception as e:
+                logger.warning(f"Could not set recycle tear guesses: {e}")
+                # Continue anyway - initialization may still work
             
             # Run decomposition with unit initialization callback
             seq.run(m, _init_unit_callback)
