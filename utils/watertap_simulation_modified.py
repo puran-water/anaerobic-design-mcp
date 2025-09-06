@@ -742,14 +742,26 @@ def _build_low_tss_mbr_flowsheet(
             f"Computed dewatering fraction (by volume): {dewatering_fraction} = {daily_waste_m3d}/{total_ad_flow_m3d}"
         )
     
-    # Set split fractions
-    # FIXED: For totalFlow splitters, we only set one split fraction, not per-component
-    # The remaining outlet is determined by the internal sum-to-one constraint.
-    _fix_or_set(
-        m.fs.ad_splitter.split_fraction[0, "to_dewatering"],
-        dewatering_fraction,
-        label="ad_splitter.split_fraction[0,to_dewatering]",
-    )
+    # Set split fraction handling:
+    # For totalFlow splitters, a single split fraction Var controls volumetric split.
+    # To avoid over-constraining the recycle network, use the heuristic value
+    # as an initial guess, but leave the split fraction UNFIXED so that
+    # downstream volumetric anchors (MBR) can resolve a consistent flow.
+    try:
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].unfix()
+    except Exception:
+        pass
+    try:
+        # Seed an initial value from heuristics
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].set_value(dewatering_fraction)
+    except Exception:
+        pass
+    # Apply broad but reasonable bounds to prevent pathological solutions
+    try:
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setlb(1e-4)
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setub(0.8)
+    except Exception:
+        pass
     
     # Translator to ASM2D for MBR
     m.fs.translator_AD_ASM = Translator_ADM1_ASM2D(
@@ -786,12 +798,16 @@ def _build_low_tss_mbr_flowsheet(
     m.fs.eq_mbr_perm_vol = pyo.Constraint(
         expr=m.fs.MBR.permeate.flow_vol[0] == m.fs.mbr_recovery * m.fs.MBR.inlet.flow_vol[0]
     )
-    # 2) Inlet setpoint tied to feed to enforce 5Q operation (configurable via recirc_ratio)
-    #    This prevents the entire recycle loop from collapsing to sub-design flows.
-    # TEMPORARILY DISABLED: Creating DOF=-1 over-constraint
-    # m.fs.eq_mbr_inlet_anchor = pyo.Constraint(
-    #     expr=m.fs.MBR.inlet.flow_vol[0] == (1.0 + recirc_ratio) * m.fs.feed.properties[0].flow_vol
-    # )
+    # 2) Permeate-flow anchor tied to feed to enforce 1Q effluent
+    #    Combined with the recovery constraint, this implies 5Q at the MBR inlet
+    #    without directly fixing the upstream MBR inlet (avoids DOF=-1).
+    try:
+        m.fs.eq_mbr_perm_anchor = pyo.Constraint(
+            expr=m.fs.MBR.permeate.flow_vol[0] == m.fs.feed.properties[0].flow_vol
+        )
+    except Exception:
+        # If property vars differ or not available, skip anchoring
+        pass
     # Note: Don't add retentate constraint - Separator's mass balance handles it
     # The retentate flow is determined by: inlet = permeate + retentate
     
