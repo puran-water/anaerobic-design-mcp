@@ -2,7 +2,6 @@
 
 import logging
 from typing import Dict, Any, Optional, Union
-from core.models import AnyDict
 from core.state import design_state
 from core.utils import coerce_to_dict, to_float
 from utils.heuristic_sizing import perform_heuristic_sizing
@@ -14,7 +13,7 @@ async def heuristic_sizing_ad(
     biomass_yield: Optional[Union[float, int, str]] = None,
     target_srt_days: Optional[Union[float, int, str]] = None,
     use_current_basis: bool = True,
-    custom_basis: Optional[AnyDict] = None
+    custom_basis: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Perform heuristic sizing for anaerobic digester based on COD load and biomass yield.

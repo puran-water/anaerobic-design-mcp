@@ -2,7 +2,6 @@
 
 import logging
 from typing import Dict, Any, Optional
-from core.models import AnyDict
 from core.state import design_state
 from core.utils import coerce_to_dict, to_float
 
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 async def elicit_basis_of_design(
     parameter_group: str = "essential",
-    current_values: Optional[AnyDict] = None
+    current_values: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Elicit basis of design parameters for anaerobic digester design.

@@ -3,7 +3,6 @@
 import anyio
 import logging
 from typing import Dict, Any, Optional
-from core.models import AnyDict
 from core.state import design_state
 from core.utils import coerce_to_dict
 from core.subprocess_runner import (
@@ -20,7 +19,7 @@ async def simulate_ad_system_tool(
     costing_method: str = "WaterTAPCosting",
     initialize_only: bool = False,
     detail_level: str = "summary",
-    custom_inputs: Optional[AnyDict] = None
+    custom_inputs: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Simulate anaerobic digester system using WaterTAP with Modified ADM1.

@@ -3,8 +3,12 @@
 """
 ADM1 state validation utilities.
 
+NOTE: This module is being superseded by watertap_validation.py which uses
+WaterTAP's property package directly for more accurate calculations. 
+These functions remain as a fallback when WaterTAP is not available.
+
 Validates ADM1 state variables against composite parameters (COD, TSS, TKN, TP, pH, Alkalinity)
-using WaterTAP property model calculations.
+using simplified calculations.
 """
 
 import logging
