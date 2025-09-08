@@ -44,8 +44,8 @@ def test_direct_simulation():
             "permeate_flux_lmh": 15,
             "mlss_concentration_mg_l": 12000,
             "expected_permeate_m3d": 999,
-            "sigma_soluble": 0.0,
-            "sigma_particulate": 1.0
+            "sigma_soluble": 1.0,  # Full passage of dissolved species (FIXED from 0.0)
+            "sigma_particulate": 1e-4  # Near-zero passage of particulates (FIXED from 1.0)
         },
         "dewatering": {
             "tss_removal_efficiency": 0.98,

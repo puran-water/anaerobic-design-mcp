@@ -9,6 +9,7 @@ Supports two configurations based on heuristic sizing:
 """
 
 import logging
+import math
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 import pyomo.environ as pyo
@@ -844,9 +845,47 @@ def _build_low_tss_mbr_flowsheet(
     
     # 1) User-tunable defaults (can be overridden via heuristic_config['mbr'])
     mbr_cfg = heuristic_config.get("mbr", {}) if isinstance(heuristic_config, dict) else {}
-    sigma_soluble = float(mbr_cfg.get("sigma_soluble", 1.0))       # ~full passage
-    sigma_partic = float(mbr_cfg.get("sigma_particulate", 1e-4))   # ~no passage
+
+    # Our "sigma" here is a passage coefficient (Cp/Cf relative to water split),
+    # not the SKK reflection coefficient. For soluble species, sigma should be ~1.0
+    # (nearly full passage), and for particulates sigma should be ~1e-4 (nearly no passage).
+    sigma_soluble = float(mbr_cfg.get("sigma_soluble", 1.0))       # default: full passage
+    sigma_partic = float(mbr_cfg.get("sigma_particulate", 1e-4))   # default: no passage
     sigma_h2o = float(mbr_cfg.get("sigma_h2o", 1.0))              # water follows volume
+
+    # Accept alternate semantics if user provided reflection-type values
+    # (i.e., 1=rejection, 0=passage). If this pattern is detected (soluble near 0 and
+    # particulate near 1), auto-convert unless explicitly disabled.
+    try:
+        auto_correct = bool(mbr_cfg.get("auto_correct_sigma", True))
+    except Exception:
+        auto_correct = True
+
+    try:
+        if auto_correct and sigma_soluble <= 0.05 and sigma_partic >= 0.95:
+            logger.warning(
+                "MBR sigma appears to use reflection semantics (soluble≈0, particulate≈1). "
+                "Interpreting as reflection coefficients and converting to passage: "
+                f"soluble→{1.0 - sigma_soluble:.3f}, particulate→{1.0 - sigma_partic:.3f}. "
+                "Set mbr.auto_correct_sigma=False to disable."
+            )
+            sigma_soluble = 1.0 - sigma_soluble
+            sigma_partic = 1.0 - sigma_partic
+    except Exception:
+        pass
+
+    # Guard-rails: warn on clearly non-physical values
+    if sigma_soluble < 0.8:
+        logger.warning(
+            f"sigma_soluble={sigma_soluble:.3f} implies significant rejection of dissolved species. "
+            "Membranes in MBRs typically pass dissolved ions like ammonia (S_IN). "
+            "This can cause TAN accumulation and pH crash."
+        )
+    if sigma_partic > 1e-2:
+        logger.warning(
+            f"sigma_particulate={sigma_partic:.3f} allows particulate passage to permeate. "
+            "Typical MBR behavior is near-zero passage for particulates."
+        )
     
     # 2) Define σ_j for all components
     sigma_init = {}
@@ -888,7 +927,17 @@ def _build_low_tss_mbr_flowsheet(
                          b.mbr_sigma[j] * b.MBR.split_fraction[0, "permeate", "H2O"]
     )
     
-    logger.info(f"Applied sieving coefficient approach: σ_soluble={sigma_soluble}, σ_particulate={sigma_partic}")
+    logger.info(f"Applied sieving coefficient approach (passage): σ_soluble={sigma_soluble}, σ_particulate={sigma_partic}")
+
+    # Extra visibility for ammonia handling
+    try:
+        if any(str(j) == "S_IN" for j in m.fs.props_ASM2D.component_list):
+            logger.info(
+                f"MBR S_IN passage coefficient (relative to water) set to σ={sigma_soluble}. "
+                "S_IN will follow H2O split if σ≈1.0 and be rejected if σ≈0.0."
+            )
+    except Exception:
+        pass
     
     # Translator for MBR retentate back to ADM1
     m.fs.translator_ASM_AD_mbr = Translator_ASM2d_ADM1(
@@ -1672,14 +1721,24 @@ def solve_flowsheet(
     solver = get_solver()
     
     # Add robust solver options for difficult ADM1 problems with pH calculations
-    solver.options["max_iter"] = 800                    # Increase from default 200 for convergence
+    # Updated solver configuration per IDAES best practices
+    solver.options["nlp_scaling_method"] = "user-scaling"  # Use user-provided scaling
+    solver.options["max_iter"] = 500                       # Sufficient for complex systems
     solver.options["mu_strategy"] = "adaptive"
-    solver.options["mu_init"] = 1e-6                    # Small barrier parameter
-    solver.options["bound_push"] = 1e-6                 # More conservative bound push
-    solver.options["bound_frac"] = 0.01                 # Fraction of bound distance
-    solver.options["bound_relax_factor"] = 0            # No bound relaxation
-    solver.options["tol"] = 1e-8                        # Tighter convergence tolerance
-    solver.options["compl_inf_tol"] = 1e-6              # Complementarity tolerance
+    solver.options["mu_init"] = 1e-8                       # Per Codex recommendation
+    solver.options["bound_push"] = 1e-10                   # Tighter for stiff systems
+    solver.options["bound_frac"] = 0.01                    # Fraction of bound distance
+    solver.options["bound_relax_factor"] = 0               # No bound relaxation
+    solver.options["tol"] = 1e-8                           # Start tight, can relax to 1e-6
+    solver.options["compl_inf_tol"] = 1e-6                 # Complementarity tolerance
+    # Try to use HSL linear solver if available (ma57 or ma27)
+    try:
+        solver.options["linear_solver"] = "ma57"
+    except:
+        try:
+            solver.options["linear_solver"] = "mumps"
+        except:
+            pass  # Use default linear solver
     
     # Warm-start options for robustness on re-solves
     solver.options["warm_start_init_point"] = "yes"
@@ -1779,42 +1838,58 @@ def solve_flowsheet(
                 try:
                     logger.info("=== INHIBITION FACTORS (0=complete inhibition, 1=no inhibition) ===")
                     rxn = m.fs.AD.liquid_phase.reactions[0]
-                    
+
                     # Complete list of inhibition factors from Modified ADM1 (confirmed via DeepWiki)
                     inhibition_vars = [
-                        # pH inhibition (critical for methanogens)
+                        # pH inhibition (critical for methanogens) — these are EXPONENTS in the model
                         ("I_pH_aa", "pH inhibition on amino acid degraders"),
                         ("I_pH_ac", "pH inhibition on ACETOCLASTIC METHANOGENS - CRITICAL"),
                         ("I_pH_h2", "pH inhibition on HYDROGENOTROPHIC METHANOGENS - CRITICAL"),
-                        
-                        # Nutrient limitation
+
+                        # Nutrient limitation (direct 0–1 multipliers)
                         ("I_IN_lim", "Inorganic nitrogen limitation"),
                         ("I_IP_lim", "Inorganic phosphorus limitation"),
-                        
-                        # Hydrogen inhibition
+
+                        # Hydrogen inhibition (direct 0–1 multipliers)
                         ("I_h2_fa", "H2 inhibition on fatty acid degraders"),
                         ("I_h2_c4", "H2 inhibition on valerate/butyrate degraders"),
                         ("I_h2_pro", "H2 inhibition on propionate degraders"),
-                        
-                        # Ammonia inhibition (high TAN can kill methanogens)
+
+                        # Ammonia inhibition (direct 0–1 multipliers)
                         ("I_nh3", "FREE AMMONIA inhibition - CRITICAL"),
-                        
-                        # H2S inhibition (usually negligible if Z_h2s = 0)
+
+                        # H2S inhibition (direct 0–1 multipliers; often unity if Z_h2s=0)
                         ("I_h2s_ac", "H2S inhibition on acetoclastic methanogens"),
                         ("I_h2s_c4", "H2S inhibition on C4 degraders"),
                         ("I_h2s_h2", "H2S inhibition on hydrogenotrophic methanogens"),
-                        ("I_h2s_pro", "H2S inhibition on propionate degraders")
+                        ("I_h2s_pro", "H2S inhibition on propionate degraders"),
                     ]
-                    
+
+                    pH_exponent_keys = {"I_pH_aa", "I_pH_ac", "I_pH_h2"}
+
                     for var_name, description in inhibition_vars:
                         try:
                             if hasattr(rxn, var_name):
-                                val = pyo.value(getattr(rxn, var_name))
-                                if val < 0.9:  # Flag significant inhibition
-                                    logger.warning(f"  {var_name}: {val:.4f} - {description} ***INHIBITED***")
+                                raw_val = pyo.value(getattr(rxn, var_name))
+                                if var_name in pH_exponent_keys:
+                                    # Convert exponent to final 0–1 factor used by the kinetics
+                                    fac = math.exp(raw_val)
+                                    fac = max(0.0, min(1.0, fac))
+                                    if fac < 0.9:
+                                        logger.warning(
+                                            f"  {var_name}: factor={fac:.4e} (exp={raw_val:.3f}) - {description} ***INHIBITED***"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"  {var_name}: factor={fac:.4f} (exp={raw_val:.3f}) - {description}"
+                                        )
                                 else:
-                                    logger.info(f"  {var_name}: {val:.4f} - {description}")
-                        except:
+                                    fac = max(0.0, min(1.0, raw_val))
+                                    if fac < 0.9:
+                                        logger.warning(f"  {var_name}: {fac:.4f} - {description} ***INHIBITED***")
+                                    else:
+                                        logger.info(f"  {var_name}: {fac:.4f} - {description}")
+                        except Exception:
                             pass
                     
                     # Also check overall reaction rates for methanogens
@@ -1914,28 +1989,41 @@ def solve_flowsheet(
             if hasattr(m.fs.AD.liquid_phase, 'reactions'):
                 rxn = m.fs.AD.liquid_phase.reactions[0]
                 digester_metrics["inhibition_factors"] = {}
-                
-                # List of all inhibition factors to check
+                digester_metrics["inhibition_exponents_raw"] = {}
+
+                # List of inhibition terms to report
                 inhibition_list = [
-                    "I_pH_aa", "I_pH_ac", "I_pH_h2",  # pH inhibition
-                    "I_IN_lim", "I_IP_lim",  # Nutrient limitation
-                    "I_h2_fa", "I_h2_c4", "I_h2_pro",  # H2 inhibition
-                    "I_nh3",  # Ammonia inhibition
-                    "I_h2s_ac", "I_h2s_c4", "I_h2s_h2", "I_h2s_pro"  # H2S inhibition
+                    "I_pH_aa", "I_pH_ac", "I_pH_h2",  # pH inhibition (stored as exponent in model)
+                    "I_IN_lim", "I_IP_lim",            # Nutrient limitation (0–1)
+                    "I_h2_fa", "I_h2_c4", "I_h2_pro", # H2 inhibition (0–1)
+                    "I_nh3",                            # Ammonia inhibition (0–1)
+                    "I_h2s_ac", "I_h2s_c4", "I_h2s_h2", "I_h2s_pro",  # H2S (0–1)
                 ]
-                
+
+                pH_exponent_keys = {"I_pH_aa", "I_pH_ac", "I_pH_h2"}
+
                 for inhib in inhibition_list:
                     try:
                         if hasattr(rxn, inhib):
-                            digester_metrics["inhibition_factors"][inhib] = pyo.value(getattr(rxn, inhib))
-                    except:
+                            raw_val = pyo.value(getattr(rxn, inhib))
+                            if inhib in pH_exponent_keys:
+                                # Save raw exponent and 0–1 factor
+                                digester_metrics["inhibition_exponents_raw"][inhib] = float(raw_val)
+                                fac = math.exp(raw_val)
+                                digester_metrics["inhibition_factors"][inhib] = float(max(0.0, min(1.0, fac)))
+                            else:
+                                digester_metrics["inhibition_factors"][inhib] = float(max(0.0, min(1.0, raw_val)))
+                    except Exception:
                         pass
-                
-                # Flag critical inhibitions
+
+                # Flag critical inhibitions based on final 0–1 factors
                 critical_inhibitions = []
                 for name, value in digester_metrics["inhibition_factors"].items():
-                    if value < 0.5:  # Severe inhibition if < 0.5
-                        critical_inhibitions.append(f"{name}={value:.3f}")
+                    try:
+                        if float(value) < 0.5:  # Severe inhibition if < 0.5
+                            critical_inhibitions.append(f"{name}={float(value):.3f}")
+                    except Exception:
+                        continue
                 digester_metrics["critical_inhibitions"] = critical_inhibitions
             
             # Get digestate TSS and VSS
@@ -1977,6 +2065,66 @@ def solve_flowsheet(
     # Add MBR results if present
     if hasattr(m.fs, "MBR"):
         output["mbr_permeate_flow_m3d"] = pyo.value(m.fs.MBR.permeate.flow_vol[0]) * 86400
+        
+        # Nitrogen mass balance check at MBR
+        try:
+            # Get S_IN concentrations (kg/m³)
+            S_IN_in = pyo.value(m.fs.MBR.inlet.conc_mass_comp[0, "S_IN"])
+            S_IN_perm = pyo.value(m.fs.MBR.permeate.conc_mass_comp[0, "S_IN"])
+            S_IN_ret = pyo.value(m.fs.MBR.retentate.conc_mass_comp[0, "S_IN"])
+            
+            # Get flows (m³/s)
+            flow_in = pyo.value(m.fs.MBR.inlet.flow_vol[0])
+            flow_perm = pyo.value(m.fs.MBR.permeate.flow_vol[0])
+            flow_ret = pyo.value(m.fs.MBR.retentate.flow_vol[0])
+            
+            # Calculate nitrogen flows (kg/s)
+            N_in = flow_in * S_IN_in
+            N_perm = flow_perm * S_IN_perm
+            N_ret = flow_ret * S_IN_ret
+            
+            # Check balance
+            residual = abs(N_in - N_perm - N_ret)
+            residual_percent = 100 * residual / max(N_in, 1e-10)
+            
+            # Calculate passage fraction for S_IN
+            passage_S_IN = N_perm / max(N_in, 1e-10)
+            passage_H2O = flow_perm / max(flow_in, 1e-10)
+            
+            # Expected passage based on sigma_soluble
+            mbr_config = heuristic_config.get("mbr", {}) if heuristic_config else {}
+            sigma_soluble = float(mbr_config.get("sigma_soluble", 1.0))
+            expected_passage = sigma_soluble * passage_H2O
+            
+            output["nitrogen_balance"] = {
+                "S_IN_inlet_kg_m3": S_IN_in,
+                "S_IN_permeate_kg_m3": S_IN_perm,
+                "S_IN_retentate_kg_m3": S_IN_ret,
+                "N_flow_in_kg_d": N_in * 86400,
+                "N_flow_permeate_kg_d": N_perm * 86400,
+                "N_flow_retentate_kg_d": N_ret * 86400,
+                "mass_balance_error_percent": residual_percent,
+                "S_IN_passage_fraction": passage_S_IN,
+                "H2O_passage_fraction": passage_H2O,
+                "expected_S_IN_passage": expected_passage,
+                "anomalous_rejection": abs(passage_S_IN - expected_passage) > 0.1
+            }
+            
+            # Log warning if nitrogen is being rejected anomalously
+            if abs(passage_S_IN - expected_passage) > 0.1:
+                logger.warning(
+                    f"Anomalous S_IN rejection detected at MBR: "
+                    f"passage={passage_S_IN:.3f} vs expected={expected_passage:.3f}. "
+                    f"This can cause TAN accumulation."
+                )
+            
+            # Assert mass balance
+            if residual_percent > 0.1:  # 0.1% tolerance
+                logger.warning(f"Nitrogen mass balance error at MBR: {residual_percent:.3f}%")
+            
+        except Exception as e:
+            logger.warning(f"Could not check nitrogen balance: {e}")
+            output["nitrogen_balance"] = {"error": str(e)}
     
     # Add dewatering results
     if hasattr(m.fs, "dewatering"):

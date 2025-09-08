@@ -2,11 +2,11 @@
   "status": "failed",
   "flowsheet_type": "low_tss_mbr",
   "operational_results": {
-    "biogas_production_m3d": 9064.87403588605,
-    "methane_fraction": 0.17548966769228497,
-    "sludge_production_m3d": 83.89203743284327,
-    "centrate_flow_m3d": 2.7987544192431177,
-    "mbr_permeate_flow_m3d": 916.1082161140423
+    "biogas_production_m3d": 533.9768752602455,
+    "methane_fraction": 0.8649163022307601,
+    "sludge_production_m3d": 0.9671249622042554,
+    "centrate_flow_m3d": 0.033427025073645956,
+    "mbr_permeate_flow_m3d": 999.0328749494054
   },
   "economic_results": {
     "total_capital_cost": null,
