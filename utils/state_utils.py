@@ -15,7 +15,9 @@ def clean_adm1_state(adm1_state: Dict[str, Any]) -> Tuple[Dict[str, float], List
         "S_h2", "S_ch4", "S_IC", "S_IN", "S_I",
         "X_c", "X_ch", "X_pr", "X_li", "X_su", "X_aa", "X_fa",
         "X_c4", "X_pro", "X_ac", "X_h2", "X_I",
-        "S_cat", "S_an", "S_co2", "S_nh4", "S_H"
+        "S_cat", "S_an", "S_H"
+        # Note: S_co2 is derived from S_IC and pH, not a state variable
+        # Note: S_nh4 doesn't exist in Modified ADM1, S_IN handles all inorganic nitrogen
     ]
     
     for comp in required_components:
@@ -88,15 +90,23 @@ def regularize_adm1_state_for_initialization(
             warnings.append(f"{comp} negative, setting to 1e-10")
             regularized[comp] = 1e-10
     
+    # Validate S_cat and S_an without modifying them
+    # These represent OTHER ions not already in the model
+    # They are NOT required to be equal - their difference maintains electroneutrality
     S_cat = regularized.get("S_cat", 0.04)
     S_an = regularized.get("S_an", 0.02)
     
-    if abs(S_cat - S_an) > 0.1:
-        warnings.append(f"Ion imbalance: S_cat={S_cat}, S_an={S_an}")
-        avg = (S_cat + S_an) / 2
-        regularized["S_cat"] = avg + 0.01
-        regularized["S_an"] = avg - 0.01
-        warnings.append(f"Adjusted ions")
+    # Only fix if negative (physically impossible)
+    if S_cat < 0:
+        warnings.append(f"S_cat negative ({S_cat}), setting to 0.01")
+        regularized["S_cat"] = 0.01
+    if S_an < 0:
+        warnings.append(f"S_an negative ({S_an}), setting to 0.01")
+        regularized["S_an"] = 0.01
+    
+    # Optional warning for extreme differences (but don't modify)
+    if abs(S_cat - S_an) > 1.0:  # kmol/m³ - only warn for very large differences
+        warnings.append(f"Large ion difference: S_cat={S_cat:.3f}, S_an={S_an:.3f} (keeping as-is for electroneutrality)")
     
     return regularized, warnings
 
