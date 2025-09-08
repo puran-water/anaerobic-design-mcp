@@ -97,14 +97,18 @@ async def simulate_ad_system_tool(
             if "economic_results" in sim_results:
                 design_state.economic_results = sim_results["economic_results"]
         
-        # Filter response based on detail level
-        filtered_results = filter_simulation_response(sim_results, detail_level)
-        
-        # Save full logs if requested
-        if detail_level == "full" and sim_results.get("status") == "success":
+        # Always save full logs to disk for debugging (per user request)
+        if sim_results.get("status") in ["success", "failed"]:
             log_file = save_full_logs(sim_results)
             if log_file:
-                filtered_results["full_log_saved_to"] = log_file
+                logger.info(f"Full simulation results saved to: {log_file}")
+        
+        # Filter response based on detail level for MCP return
+        filtered_results = filter_simulation_response(sim_results, detail_level)
+        
+        # Add log file path to results if saved
+        if 'log_file' in locals() and log_file:
+            filtered_results["full_log_saved_to"] = log_file
         
         return filtered_results
         

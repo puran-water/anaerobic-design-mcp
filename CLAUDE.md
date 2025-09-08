@@ -1,5 +1,33 @@
 # Claude Integration Guide for Anaerobic Digester Design MCP
 
+## CRITICAL INSTRUCTIONS - MUST FOLLOW
+
+### PAUSE POINT REQUIREMENTS
+**YOU MUST PAUSE before testing MCP tools after ANY of the following:**
+1. Refactoring or modifying MCP tool implementations
+2. Changing tool function signatures or parameters
+3. Modifying validation logic or state handling
+4. Implementing fixes that affect tool behavior
+5. Making changes to the MCP server code
+
+**How to PAUSE correctly:**
+```python
+print("\n" + "="*80)
+print("PAUSE POINT - MCP Tool Testing")
+print("="*80)
+print("Changes made:")
+print("  - [List each change]")
+print("\nReady to test MCP tool: [tool_name]")
+print("Press Enter to continue...")
+input()  # WAIT for user confirmation
+```
+
+**NEVER skip the pause - the user may need to:**
+- Restart the MCP server
+- Review changes before testing
+- Prepare monitoring/logging
+- Ensure the environment is ready
+
 ## Overview
 
 This project provides two MCP servers that work together:

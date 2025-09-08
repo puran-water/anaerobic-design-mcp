@@ -417,7 +417,7 @@ def _build_common_components(
         pass
 
     init_state, init_warnings = regularize_adm1_state_for_initialization(
-        clean_state, target_alkalinity_meq_l=bod_alk, ph=bod_ph
+        clean_state, basis_of_design
     )
     if init_warnings:
         for w in init_warnings:
@@ -722,6 +722,8 @@ def _build_low_tss_mbr_flowsheet(
         destination=m.fs.ad_splitter.inlet
     )
     
+    # Placeholder for water balance - will be added after MBR and dewatering are created
+    
     # Calculate split fractions (dewatering pulls waste sludge directly from AD)
     # Priority: explicit volume_fraction (if provided) > daily_waste_m3d / (expected AD flow)
     # This avoids tiny implied fractions if heuristics provide a direct volumetric ratio.
@@ -742,26 +744,21 @@ def _build_low_tss_mbr_flowsheet(
             f"Computed dewatering fraction (by volume): {dewatering_fraction} = {daily_waste_m3d}/{total_ad_flow_m3d}"
         )
     
-    # Set split fraction handling:
-    # For totalFlow splitters, a single split fraction Var controls volumetric split.
-    # To avoid over-constraining the recycle network, use the heuristic value
-    # as an initial guess, but leave the split fraction UNFIXED so that
-    # downstream volumetric anchors (MBR) can resolve a consistent flow.
+    # Fix split fraction to expected value from heuristics
+    # This is needed to close DOF properly
+    # The fraction sends ~333 m³/d to dewatering out of ~5333 m³/d total
     try:
-        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].unfix()
-    except Exception:
-        pass
-    try:
-        # Seed an initial value from heuristics
-        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].set_value(dewatering_fraction)
-    except Exception:
-        pass
-    # Apply broad but reasonable bounds to prevent pathological solutions
-    try:
-        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setlb(1e-4)
-        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setub(0.8)
-    except Exception:
-        pass
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].fix(dewatering_fraction)
+        logger.info(f"Fixed AD splitter fraction to {dewatering_fraction:.4f}")
+    except Exception as e:
+        logger.warning(f"Could not fix splitter fraction: {e}")
+        # If we can't fix it, at least set value and bounds
+        try:
+            m.fs.ad_splitter.split_fraction[0, "to_dewatering"].set_value(dewatering_fraction)
+            m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setlb(1e-4)
+            m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setub(0.8)
+        except Exception:
+            pass
     
     # Translator to ASM2D for MBR
     m.fs.translator_AD_ASM = Translator_ADM1_ASM2D(
@@ -809,9 +806,16 @@ def _build_low_tss_mbr_flowsheet(
     # Note: Don't add retentate constraint - Separator's mass balance handles it
     # The retentate flow is determined by: inlet = permeate + retentate
     
+    # Set bounds on MBR inlet to guide solution (not fix)
+    feed_flow_m3s = float(basis_of_design.get("feed_flow_m3d", 1000.0)) / 86400.0
+    m.fs.MBR.inlet.flow_vol[0].setlb(4.5 * feed_flow_m3s)  # Min 4.5Q
+    m.fs.MBR.inlet.flow_vol[0].setub(5.5 * feed_flow_m3s)  # Max 5.5Q
+    
+    # Don't fix MBR inlet - let it emerge from mass balances
+    
     # Set lower bounds to keep flows strictly positive and away from degenerate solution
-    m.fs.MBR.permeate.flow_vol[0].setlb(1e-4)  # ~0.01 m³/d minimum
-    m.fs.MBR.retentate.flow_vol[0].setlb(1e-3)  # ~0.1 m³/d minimum
+    m.fs.MBR.permeate.flow_vol[0].setlb(1e-4)  # 8.64 m³/d minimum
+    m.fs.MBR.retentate.flow_vol[0].setlb(1e-3)  # 86.4 m³/d minimum
 
     # Optional: enforce minimum MBR inlet/permeate flows to escape low-flow basin
     # Enabled via heuristic_config['diagnostics']['force_mbr_min_constraints'] = True
@@ -834,35 +838,57 @@ def _build_low_tss_mbr_flowsheet(
     except Exception as e:
         logger.warning(f"Failed to set MBR min-flow constraints: {e}")
     
-    # Configure component splits (H2O unfixed - handled by volumetric constraint)
+    # --- SIEVING-ANCHORED MBR SPLITS (physically consistent & numerically stable)
+    # Fix for structural inconsistency: tie component mass splits to volumetric recovery
+    # via sieving coefficients to maintain concentration consistency
+    
+    # 1) User-tunable defaults (can be overridden via heuristic_config['mbr'])
+    mbr_cfg = heuristic_config.get("mbr", {}) if isinstance(heuristic_config, dict) else {}
+    sigma_soluble = float(mbr_cfg.get("sigma_soluble", 1.0))       # ~full passage
+    sigma_partic = float(mbr_cfg.get("sigma_particulate", 1e-4))   # ~no passage
+    sigma_h2o = float(mbr_cfg.get("sigma_h2o", 1.0))              # water follows volume
+    
+    # 2) Define σ_j for all components
+    sigma_init = {}
     for comp in m.fs.props_ASM2D.component_list:
-        comp_name = str(comp)
-        
-        if comp_name == "H2O":
-            # Leave H2O split unfixed - volumetric constraints determine it
-            m.fs.MBR.split_fraction[0, "permeate", comp].unfix()
-            continue
-        elif comp_name.startswith('X_'):
-            # Particulate components - near-complete retention
-            _fix_or_set(
-                m.fs.MBR.split_fraction[0, "permeate", comp],
-                0.001,
-                label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )
-        elif comp_name.startswith('S_'):
-            # Soluble components - high transmission
-            _fix_or_set(
-                m.fs.MBR.split_fraction[0, "permeate", comp],
-                0.999999,
-                label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )
+        cname = str(comp)
+        if cname == "H2O":
+            sigma_init[comp] = sigma_h2o
+        elif cname.startswith("X_"):
+            sigma_init[comp] = sigma_partic
         else:
-            # Default - treat as soluble
-            _fix_or_set(
-                m.fs.MBR.split_fraction[0, "permeate", comp],
-                0.999999,
-                label=f"MBR.split_fraction[0,permeate,{comp}]",
-            )
+            # Treat all non-particulate components as soluble
+            sigma_init[comp] = sigma_soluble
+    
+    m.fs.mbr_sigma = pyo.Param(
+        m.fs.props_ASM2D.component_list, initialize=sigma_init, mutable=True
+    )
+    
+    # 3) Expose splits as Vars and tie them to recovery with one constraint per component
+    for comp in m.fs.props_ASM2D.component_list:
+        # Ensure they are Vars (not fixed constants from earlier logic)
+        try:
+            m.fs.MBR.split_fraction[0, "permeate", comp].unfix()
+        except Exception:
+            pass
+        # Seed a consistent initial guess
+        m.fs.MBR.split_fraction[0, "permeate", comp].set_value(
+            pyo.value(m.fs.mbr_recovery) * pyo.value(m.fs.mbr_sigma[comp])
+        )
+    
+    # Water-anchored sieving approach: explicitly exclude H2O, not "last component"
+    # This prevents freeing a sensitive species that could disrupt AD chemistry
+    components_to_constrain = [j for j in m.fs.props_ASM2D.component_list if str(j) != "H2O"]
+    
+    # Tie all non-H2O components to H2O's split (water-anchored pattern)
+    # This ensures H2O split can float to satisfy volumetric constraint
+    m.fs.eq_mbr_split = pyo.Constraint(
+        components_to_constrain,
+        rule=lambda b, j: b.MBR.split_fraction[0, "permeate", j] == 
+                         b.mbr_sigma[j] * b.MBR.split_fraction[0, "permeate", "H2O"]
+    )
+    
+    logger.info(f"Applied sieving coefficient approach: σ_soluble={sigma_soluble}, σ_particulate={sigma_partic}")
     
     # Translator for MBR retentate back to ADM1
     m.fs.translator_ASM_AD_mbr = Translator_ASM2d_ADM1(
@@ -924,6 +950,8 @@ def _build_low_tss_mbr_flowsheet(
             tss_mg_l = float(hcfg.get("digester", {}).get("mlss_mg_l"))
             return max(1e-6, tss_mg_l / 1000.0)
         except Exception:
+            # CRITICAL: Must use 15 kg/m³ for proper SRT
+            # Lower TSS reduces biomass inventory and degrades performance
             return 15.0
 
     cake_solids = dewatering_config.get("cake_solids_fraction", 0.22)
@@ -931,19 +959,15 @@ def _build_low_tss_mbr_flowsheet(
     p_dewat_guess = _compute_p_dewat_from_mass_balance(tss_in_kg_m3, capture_fraction, cake_solids)
     _fix_or_set(m.fs.dewatering.p_dewat, p_dewat_guess, label="dewatering.p_dewat")
     
-    # Anchor the waste sludge (underflow) to the heuristic daily target to
-    # prevent collapse of the dewatering branch. This works with the overall
-    # volume balance to adjust MBR permeate accordingly (feed = P + U).
-    try:
-        daily_waste_m3d = float(dewatering_config.get("daily_waste_sludge_m3d", 0.0))
-    except Exception:
-        daily_waste_m3d = 0.0
-    if daily_waste_m3d > 0:
-        m.fs.dewatering_target_uf_m3d = pyo.Param(initialize=daily_waste_m3d, mutable=True)
-        m.fs.eq_dewatering_underflow_anchor = pyo.Constraint(
-            expr=m.fs.dewatering.underflow.flow_vol[0]
-                 == (m.fs.dewatering_target_uf_m3d / 86400.0) * pyo.units.m**3 / pyo.units.s
-        )
+    # SRT constraint - this is the key to proper solids control
+    # SRT = (Solids Inventory) / (Solids Wasted per Day)
+    # We fix SRT and let the wasting flow emerge
+    srt_days = heuristic_config.get("digester", {}).get("srt_days", 30)
+    m.fs.srt_target = pyo.Param(initialize=srt_days, mutable=True)
+    
+    # Create SRT constraint
+    # Note: We'll link this to AD TSS after AD is created
+    # For now, just create a placeholder that will be connected later
     # Fix dewatering hydraulics (either HRT or volume); default HRT = 1800 s
     hrt_s = dewatering_config.get("hydraulic_retention_time_s", 1800)
     try:
@@ -974,15 +998,13 @@ def _build_low_tss_mbr_flowsheet(
         inlet_list=["fresh_feed", "mbr_recycle", "centrate_recycle"]
     )
 
-    # Now that both MBR and dewatering underflow ports exist, add the overall
-    # external volumetric balance: P + U == feed
-    try:
-        m.fs.eq_overall_external_vol_balance = pyo.Constraint(
-            expr=(m.fs.MBR.permeate.flow_vol[0] + m.fs.dewatering.underflow.flow_vol[0]
-                  == m.fs.feed.properties[0].flow_vol)
-        )
-    except Exception:
-        pass
+    # Overall external volume balance: P + U = F
+    # This is correct since we don't model water vapor in biogas
+    # Note: This means if underflow is 27 m³/d, permeate will be 973 m³/d, not 1000
+    m.fs.eq_overall_external_vol_balance = pyo.Constraint(
+        expr=m.fs.MBR.permeate.flow_vol[0] + m.fs.dewatering.underflow.flow_vol[0] ==
+             m.fs.feed.properties[0].flow_vol
+    )
     
     # Connect streams to mixer
     m.fs.arc_feed_mixer = Arc(
@@ -1466,8 +1488,27 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
             except Exception as e:
                 logger.debug(f"Optional pre-SD propagate_state skipped: {e}")
 
-            # Run decomposition with unit initialization callback
+            # Phased initialization strategy
+            # Phase 1: Temporarily fix splitter to expected ratio to help convergence
+            if hasattr(m.fs, 'ad_splitter'):
+                # Expected: ~333 m³/d to dewatering out of ~5333 m³/d AD outlet
+                expected_split = 333.0 / 5333.0  # ≈ 0.062
+                try:
+                    m.fs.ad_splitter.split_fraction[0, "to_dewatering"].fix(expected_split)
+                    logger.info(f"Phase 1: Fixed ad_splitter dewatering fraction to {expected_split:.3f}")
+                except Exception as e:
+                    logger.debug(f"Could not fix splitter fraction: {e}")
+            
+            # Phase 2: Run Sequential Decomposition with fixed splitter
             seq.run(m, _init_unit_callback)
+            
+            # Phase 3: Release splitter for final flexibility
+            if hasattr(m.fs, 'ad_splitter'):
+                try:
+                    m.fs.ad_splitter.split_fraction[0, "to_dewatering"].unfix()
+                    logger.info("Phase 3: Released ad_splitter fraction for final solve")
+                except Exception as e:
+                    logger.debug(f"Could not unfix splitter fraction: {e}")
 
             # Snapshot of key flows post-initialization for diagnostics
             try:
@@ -1493,18 +1534,27 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
                 # Get solver for intermediate solves
                 solver = get_solver()
                 
-                # Components to ramp gradually (high VFAs and gases)
-                ramp_components = ["S_ac", "S_pro", "S_bu", "S_va", "S_co2", "S_IC"]
+                # Components to ramp gradually (all potentially inhibitory components)
+                ramp_components = [
+                    "S_ac", "S_pro", "S_bu", "S_va",  # VFAs - can cause pH drop
+                    "S_co2", "S_IC",  # Carbon dioxide system - affects pH
+                    "S_IN", "S_nh4",  # Nitrogen - ammonia inhibition
+                    "S_h2", "S_ch4",  # Dissolved gases
+                    "S_cat", "S_an",  # Ionic balance affects pH
+                    "S_H"  # Direct pH control
+                ]
                 
                 # Configurable ramp steps (can be set in heuristic_config)
                 init_state = m.fs._init_adm1_state
                 final_state = m.fs._final_adm1_state
                 
                 # Get ramp steps from config or use default
+                # Use more steps for better convergence with inhibitory feeds
                 if hasattr(m.fs, "_heuristic_config"):
-                    default_steps = m.fs._heuristic_config.get("ramp_steps", [0.33, 0.67, 1.0])
+                    default_steps = m.fs._heuristic_config.get("ramp_steps", 
+                        [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
                 else:
-                    default_steps = [0.33, 0.67, 1.0]
+                    default_steps = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
                 
                 for alpha in default_steps:
                     ramped_state = dict(init_state)
@@ -1622,11 +1672,14 @@ def solve_flowsheet(
     solver = get_solver()
     
     # Add robust solver options for difficult ADM1 problems with pH calculations
+    solver.options["max_iter"] = 800                    # Increase from default 200 for convergence
     solver.options["mu_strategy"] = "adaptive"
     solver.options["mu_init"] = 1e-6                    # Small barrier parameter
     solver.options["bound_push"] = 1e-6                 # More conservative bound push
     solver.options["bound_frac"] = 0.01                 # Fraction of bound distance
     solver.options["bound_relax_factor"] = 0            # No bound relaxation
+    solver.options["tol"] = 1e-8                        # Tighter convergence tolerance
+    solver.options["compl_inf_tol"] = 1e-6              # Complementarity tolerance
     
     # Warm-start options for robustness on re-solves
     solver.options["warm_start_init_point"] = "yes"
@@ -1657,8 +1710,122 @@ def solve_flowsheet(
         else:
             logger.warning(f"Solve failed: {results.solver.termination_condition}")
     
-    # Extract results
-    # Compute biogas flow (convert to m^3/day) and methane fraction if available
+    # Enhanced biogas diagnostics
+    if hasattr(m.fs, 'AD'):
+        try:
+            logger.info("=== AD Biogas Diagnostics ===")
+            # Check pH and inhibition factors
+            ad_ph = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
+            ad_tss = pyo.value(m.fs.AD.liquid_phase.properties_out[0].TSS)
+            logger.info(f"AD pH: {ad_ph:.2f}")
+            logger.info(f"AD TSS: {ad_tss:.1f} mg/L")
+            
+            # Check if vapor outlet exists and is connected
+            if hasattr(m.fs.AD, 'vapor_outlet'):
+                vapor_flow = pyo.value(m.fs.AD.vapor_outlet.flow_vol[0])
+                logger.info(f"Vapor outlet flow: {vapor_flow:.6f} m³/s ({vapor_flow*86400:.2f} m³/d)")
+                
+                # Check gas composition
+                try:
+                    ch4_conc = pyo.value(m.fs.AD.vapor_outlet.conc_mass_comp[0, "S_ch4"])
+                    co2_conc = pyo.value(m.fs.AD.vapor_outlet.conc_mass_comp[0, "S_co2"])
+                    h2_conc = pyo.value(m.fs.AD.vapor_outlet.conc_mass_comp[0, "S_h2"])
+                    logger.info(f"Gas composition - CH4: {ch4_conc:.3f}, CO2: {co2_conc:.3f}, H2: {h2_conc:.6f} kg/m³")
+                except Exception as e:
+                    logger.warning(f"Could not get gas composition: {e}")
+                    
+                # Check biomass concentrations
+                try:
+                    x_ac = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["X_ac"])
+                    x_h2 = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["X_h2"])
+                    logger.info(f"Methanogen biomass - X_ac: {x_ac:.3f}, X_h2: {x_h2:.3f} kg/m³")
+                except Exception as e:
+                    logger.debug(f"Could not get biomass concentrations: {e}")
+                    
+                # Check VFA levels in DIGESTATE (not feed)
+                try:
+                    s_ac = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_ac"])
+                    s_pro = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_pro"])
+                    s_bu = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_bu"])
+                    s_va = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_va"])
+                    total_vfa = s_ac + s_pro + s_bu + s_va
+                    logger.info(f"DIGESTATE VFA levels - Acetate: {s_ac:.3f}, Propionate: {s_pro:.3f}, Butyrate: {s_bu:.3f}, Valerate: {s_va:.3f} kg/m³")
+                    logger.info(f"DIGESTATE Total VFA: {total_vfa:.3f} kg/m³")
+                except Exception as e:
+                    logger.debug(f"Could not get VFA levels: {e}")
+                    
+                # Check DIGESTATE ammonia (feed + protein degradation - biomass assimilation)
+                try:
+                    s_in = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_IN"])
+                    logger.info(f"DIGESTATE total ammonia nitrogen: {s_in:.3f} kg N/m³ = {s_in*1000:.1f} mg N/L")
+                except Exception as e:
+                    logger.debug(f"Could not get ammonia level: {e}")
+                    
+                # CRITICAL: Extract ALL inhibition factors from reaction block
+                try:
+                    logger.info("=== INHIBITION FACTORS (0=complete inhibition, 1=no inhibition) ===")
+                    rxn = m.fs.AD.liquid_phase.reactions[0]
+                    
+                    # Complete list of inhibition factors from Modified ADM1 (confirmed via DeepWiki)
+                    inhibition_vars = [
+                        # pH inhibition (critical for methanogens)
+                        ("I_pH_aa", "pH inhibition on amino acid degraders"),
+                        ("I_pH_ac", "pH inhibition on ACETOCLASTIC METHANOGENS - CRITICAL"),
+                        ("I_pH_h2", "pH inhibition on HYDROGENOTROPHIC METHANOGENS - CRITICAL"),
+                        
+                        # Nutrient limitation
+                        ("I_IN_lim", "Inorganic nitrogen limitation"),
+                        ("I_IP_lim", "Inorganic phosphorus limitation"),
+                        
+                        # Hydrogen inhibition
+                        ("I_h2_fa", "H2 inhibition on fatty acid degraders"),
+                        ("I_h2_c4", "H2 inhibition on valerate/butyrate degraders"),
+                        ("I_h2_pro", "H2 inhibition on propionate degraders"),
+                        
+                        # Ammonia inhibition (high TAN can kill methanogens)
+                        ("I_nh3", "FREE AMMONIA inhibition - CRITICAL"),
+                        
+                        # H2S inhibition (usually negligible if Z_h2s = 0)
+                        ("I_h2s_ac", "H2S inhibition on acetoclastic methanogens"),
+                        ("I_h2s_c4", "H2S inhibition on C4 degraders"),
+                        ("I_h2s_h2", "H2S inhibition on hydrogenotrophic methanogens"),
+                        ("I_h2s_pro", "H2S inhibition on propionate degraders")
+                    ]
+                    
+                    for var_name, description in inhibition_vars:
+                        try:
+                            if hasattr(rxn, var_name):
+                                val = pyo.value(getattr(rxn, var_name))
+                                if val < 0.9:  # Flag significant inhibition
+                                    logger.warning(f"  {var_name}: {val:.4f} - {description} ***INHIBITED***")
+                                else:
+                                    logger.info(f"  {var_name}: {val:.4f} - {description}")
+                        except:
+                            pass
+                    
+                    # Also check overall reaction rates for methanogens
+                    try:
+                        if hasattr(rxn, "rate"):
+                            for i, rate_var in rxn.rate.items():
+                                if "X_ac" in str(i) or "X_h2" in str(i):
+                                    rate_val = pyo.value(rate_var)
+                                    logger.info(f"  Reaction rate for {i}: {rate_val:.6f} kg/m³/d")
+                    except:
+                        pass
+                        
+                    logger.info("=== END INHIBITION FACTORS ===")
+                except Exception as e:
+                    logger.warning(f"Could not extract inhibition factors: {e}")
+            else:
+                logger.warning("AD vapor outlet not found - biogas production will be zero!")
+            logger.info("=== End Biogas Diagnostics ===")
+        except Exception as e:
+            logger.warning(f"Biogas diagnostics failed: {e}")
+    
+    # Extract comprehensive digester performance metrics
+    digester_metrics = {}
+    
+    # Extract basic biogas metrics
     biogas_m3d = None
     ch4_frac = None
     try:
@@ -1683,10 +1850,94 @@ def solve_flowsheet(
         except Exception:
             ch4_frac = None
     
+    # Extract digestate characteristics
+    if hasattr(m.fs, 'AD'):
+        try:
+            # Get digestate pH
+            digester_metrics["digestate_pH"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
+            
+            # Get digestate VFAs (kg/m³)
+            vfa_components = ["S_ac", "S_pro", "S_bu", "S_va"]
+            digester_metrics["digestate_VFAs_kg_m3"] = {}
+            total_vfa = 0
+            for vfa in vfa_components:
+                try:
+                    vfa_conc = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp[vfa])
+                    digester_metrics["digestate_VFAs_kg_m3"][vfa] = vfa_conc
+                    total_vfa += vfa_conc
+                except:
+                    pass
+            digester_metrics["digestate_total_VFA_kg_m3"] = total_vfa
+            
+            # Get digestate ammonia
+            digester_metrics["digestate_TAN_kg_N_m3"] = pyo.value(
+                m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_IN"]
+            )
+            digester_metrics["digestate_TAN_mg_N_L"] = digester_metrics["digestate_TAN_kg_N_m3"] * 1000
+            
+            # Get biomass concentrations
+            biomass_components = ["X_ac", "X_h2", "X_su", "X_aa", "X_fa", "X_c4", "X_pro"]
+            digester_metrics["biomass_kg_m3"] = {}
+            for bio in biomass_components:
+                try:
+                    digester_metrics["biomass_kg_m3"][bio] = pyo.value(
+                        m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp[bio]
+                    )
+                except:
+                    pass
+            
+            # Get ALL inhibition factors from reaction block
+            if hasattr(m.fs.AD.liquid_phase, 'reactions'):
+                rxn = m.fs.AD.liquid_phase.reactions[0]
+                digester_metrics["inhibition_factors"] = {}
+                
+                # List of all inhibition factors to check
+                inhibition_list = [
+                    "I_pH_aa", "I_pH_ac", "I_pH_h2",  # pH inhibition
+                    "I_IN_lim", "I_IP_lim",  # Nutrient limitation
+                    "I_h2_fa", "I_h2_c4", "I_h2_pro",  # H2 inhibition
+                    "I_nh3",  # Ammonia inhibition
+                    "I_h2s_ac", "I_h2s_c4", "I_h2s_h2", "I_h2s_pro"  # H2S inhibition
+                ]
+                
+                for inhib in inhibition_list:
+                    try:
+                        if hasattr(rxn, inhib):
+                            digester_metrics["inhibition_factors"][inhib] = pyo.value(getattr(rxn, inhib))
+                    except:
+                        pass
+                
+                # Flag critical inhibitions
+                critical_inhibitions = []
+                for name, value in digester_metrics["inhibition_factors"].items():
+                    if value < 0.5:  # Severe inhibition if < 0.5
+                        critical_inhibitions.append(f"{name}={value:.3f}")
+                digester_metrics["critical_inhibitions"] = critical_inhibitions
+            
+            # Get digestate TSS and VSS
+            digester_metrics["digestate_TSS_mg_L"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].TSS)
+            digester_metrics["digestate_VSS_mg_L"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].VSS)
+            
+        except Exception as e:
+            logger.warning(f"Could not extract all digester metrics: {e}")
+    
+    # Write digester metrics to a log file for inspection
+    try:
+        import json
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp/digester_metrics_{timestamp}.json"
+        with open(log_filename, 'w') as f:
+            json.dump(digester_metrics, f, indent=2, default=str)
+        logger.info(f"Digester metrics written to {log_filename}")
+    except Exception as e:
+        logger.warning(f"Could not write digester metrics to file: {e}")
+    
     output = {
         "solver_status": str(results.solver.termination_condition),
         "biogas_production_m3d": biogas_m3d,
         "methane_fraction": ch4_frac,
+        "digester_performance": digester_metrics,
     }
     
     # Add economic results if available
@@ -1911,6 +2162,29 @@ def simulate_ad_system(
                             pass
             
             logger.info("Applied comprehensive ADM1 scaling to all state blocks")
+            
+            # Scale volumetric constraints for better conditioning
+            # Convert from m³/s to m³/d by scaling by 86400
+            if hasattr(m.fs, "eq_mbr_perm_vol"):
+                try:
+                    iscale.constraint_scaling_transform(m.fs.eq_mbr_perm_vol, 86400)
+                    logger.info("Scaled eq_mbr_perm_vol constraint (m³/s → m³/d)")
+                except Exception as e:
+                    logger.debug(f"Could not scale eq_mbr_perm_vol: {e}")
+            
+            if hasattr(m.fs, "eq_overall_external_vol_balance"):
+                try:
+                    iscale.constraint_scaling_transform(m.fs.eq_overall_external_vol_balance, 86400)
+                    logger.info("Scaled eq_overall_external_vol_balance constraint (m³/s → m³/d)")
+                except Exception as e:
+                    logger.debug(f"Could not scale eq_overall_external_vol_balance: {e}")
+            
+            # Scale mbr_recovery and split_fraction variables (dimensionless, should be O(1))
+            if hasattr(m.fs, "mbr_recovery"):
+                try:
+                    iscale.set_scaling_factor(m.fs.mbr_recovery, 1.0)
+                except Exception:
+                    pass
                 
         except Exception as e:
             logger.debug(f"Scaling factor calculation skipped: {e}")
