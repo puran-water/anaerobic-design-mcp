@@ -261,12 +261,11 @@ def _log_key_flows(m: pyo.ConcreteModel, header: str = "") -> None:
             msg.append(f"  MBR.permeate.Q = {qd(m.fs.MBR.permeate.flow_vol[0])}")
             msg.append(f"  MBR.retentate.Q = {qd(m.fs.MBR.retentate.flow_vol[0])}")
             try:
-                recov = pyo.value(m.fs.mbr_recovery) if hasattr(m.fs, "mbr_recovery") else None
-                resid = None
-                if hasattr(m.fs, "eq_mbr_perm_vol"):
-                    resid = pyo.value(m.fs.MBR.permeate.flow_vol[0] - m.fs.mbr_recovery * m.fs.MBR.inlet.flow_vol[0])
-                    resid = resid * 86400.0  # convert to m^3/day numerator for readability
-                msg.append(f"  MBR recovery param = {recov}, volumetric residual (m3/d) = {resid}")
+                # Report actual module recovery
+                q_in = pyo.value(m.fs.MBR.inlet.flow_vol[0])
+                q_perm = pyo.value(m.fs.MBR.permeate.flow_vol[0])
+                actual_recovery = q_perm / q_in if q_in > 0 else None
+                msg.append(f"  MBR module recovery = {actual_recovery:.3f} (target 0.2)")
             except Exception:
                 pass
         logger.info("\n".join(msg))
@@ -302,6 +301,9 @@ def build_ad_flowsheet(
     
     # Store configuration for reference
     m.fs.config = config
+    
+    # Store basis_of_design for reference in solve_flowsheet
+    m.fs.basis_of_design = basis_of_design
     
     # Build common components
     _build_common_components(m, basis_of_design, adm1_state, heuristic_config)
@@ -795,10 +797,16 @@ def _build_low_tss_mbr_flowsheet(
     #    Make recovery a Var so we can add one more equality (overall balance)
     #    while maintaining DOF = 0. Keep it near the design value (0.2) with
     #    reasonable bounds.
-    m.fs.mbr_recovery = pyo.Var(bounds=(0.05, 0.8), initialize=0.2)
-    m.fs.eq_mbr_perm_vol = pyo.Constraint(
-        expr=m.fs.MBR.permeate.flow_vol[0] == m.fs.mbr_recovery * m.fs.MBR.inlet.flow_vol[0]
-    )
+    # REMOVED: mbr_recovery variable and volumetric constraint to avoid over-constraining
+    # The recovery is now set directly on the H2O split fraction
+    # m.fs.mbr_recovery = pyo.Var(bounds=(0.05, 0.8), initialize=0.2)
+    # m.fs.eq_mbr_perm_vol = pyo.Constraint(
+    #     expr=m.fs.MBR.permeate.flow_vol[0] == m.fs.mbr_recovery * m.fs.MBR.inlet.flow_vol[0]
+    # )
+    
+    # Set MBR recovery directly on water split (module recovery ~20% for 5:1 recycle)
+    mbr_module_recovery = 0.2  # 1Q permeate from 5Q inlet
+    
     # 2) Replace the strict permeate==feed anchor with an overall external
     #    volumetric balance: MBR permeate + dewatering underflow == feed.
     #    This permits non-zero waste sludge while keeping the overall volumetric
@@ -912,15 +920,18 @@ def _build_low_tss_mbr_flowsheet(
             pass
         # Seed a consistent initial guess
         m.fs.MBR.split_fraction[0, "permeate", comp].set_value(
-            pyo.value(m.fs.mbr_recovery) * pyo.value(m.fs.mbr_sigma[comp])
+            mbr_module_recovery * pyo.value(m.fs.mbr_sigma[comp])
         )
     
     # Water-anchored sieving approach: explicitly exclude H2O, not "last component"
     # This prevents freeing a sensitive species that could disrupt AD chemistry
     components_to_constrain = [j for j in m.fs.props_ASM2D.component_list if str(j) != "H2O"]
     
+    # Fix H2O split fraction to the desired module recovery
+    m.fs.MBR.split_fraction[0, "permeate", "H2O"].fix(mbr_module_recovery)
+    
     # Tie all non-H2O components to H2O's split (water-anchored pattern)
-    # This ensures H2O split can float to satisfy volumetric constraint
+    # All components follow H2O based on their sigma values
     m.fs.eq_mbr_split = pyo.Constraint(
         components_to_constrain,
         rule=lambda b, j: b.MBR.split_fraction[0, "permeate", j] == 
@@ -1048,12 +1059,13 @@ def _build_low_tss_mbr_flowsheet(
     )
 
     # Overall external volume balance: P + U = F
-    # This is correct since we don't model water vapor in biogas
+    # DIAGNOSTIC ONLY - Commented out to avoid over-constraining
+    # The balance emerges naturally from component mass balances
     # Note: This means if underflow is 27 m³/d, permeate will be 973 m³/d, not 1000
-    m.fs.eq_overall_external_vol_balance = pyo.Constraint(
-        expr=m.fs.MBR.permeate.flow_vol[0] + m.fs.dewatering.underflow.flow_vol[0] ==
-             m.fs.feed.properties[0].flow_vol
-    )
+    # m.fs.eq_overall_external_vol_balance = pyo.Constraint(
+    #     expr=m.fs.MBR.permeate.flow_vol[0] + m.fs.dewatering.underflow.flow_vol[0] ==
+    #          m.fs.feed.properties[0].flow_vol
+    # )
     
     # Connect streams to mixer
     m.fs.arc_feed_mixer = Arc(
@@ -2037,6 +2049,24 @@ def solve_flowsheet(
             digester_metrics["digestate_TSS_mg_L"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].TSS)
             digester_metrics["digestate_VSS_mg_L"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].VSS)
             
+            # Add detailed biomass composition for MLSS calculation
+            biomass_components = [
+                "X_su", "X_aa", "X_fa", "X_c4", "X_pro", "X_ac", "X_h2",  # Active biomass
+                "X_ch", "X_pr", "X_li", "X_I", "X_P", "X_S"  # Composite particulates
+            ]
+            digester_metrics["biomass_composition_kg_m3"] = {}
+            total_biomass_kg_m3 = 0
+            for comp in biomass_components:
+                try:
+                    conc = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp[comp])
+                    digester_metrics["biomass_composition_kg_m3"][comp] = conc
+                    total_biomass_kg_m3 += conc
+                except:
+                    pass
+            digester_metrics["total_biomass_kg_m3"] = total_biomass_kg_m3
+            digester_metrics["MLSS_mg_L"] = digester_metrics["digestate_TSS_mg_L"]
+            digester_metrics["MLVSS_mg_L"] = digester_metrics["digestate_VSS_mg_L"]
+            
         except Exception as e:
             logger.warning(f"Could not extract all digester metrics: {e}")
     
@@ -2056,12 +2086,189 @@ def solve_flowsheet(
     except Exception as e:
         logger.warning(f"Could not write digester metrics to file: {e}")
     
+    # Calculate COD removal based on biogas production
+    cod_removal_info = {}
+    try:
+        # Get feed COD
+        feed_flow_m3d = pyo.value(m.fs.feed.properties[0].flow_vol) * 86400  # m³/d
+        # Try to get COD from feed state
+        try:
+            feed_cod_mg_l = pyo.value(m.fs.feed.properties[0].COD) * 1000  # Convert kg/m³ to mg/L
+        except:
+            # Use basis_of_design if available
+            basis_of_design = getattr(m.fs, 'basis_of_design', None)
+            feed_cod_mg_l = basis_of_design.get("cod_mg_l", 50000) if basis_of_design else 50000
+        
+        feed_cod_kg_d = feed_flow_m3d * (feed_cod_mg_l / 1000)  # kg COD/d
+        
+        # Calculate COD to methane using volumetric basis
+        # 0.35 m³ CH4 per kg COD removed (at STP)
+        ch4_m3d = biogas_m3d * ch4_frac if ch4_frac else 0
+        cod_to_ch4_kg_d = ch4_m3d / 0.35  # kg COD/d converted to CH4
+        
+        cod_removal_pct = 100 * cod_to_ch4_kg_d / feed_cod_kg_d if feed_cod_kg_d > 0 else 0
+        
+        cod_removal_info = {
+            "feed_cod_mg_l": feed_cod_mg_l,
+            "feed_cod_kg_d": feed_cod_kg_d,
+            "ch4_production_m3d": ch4_m3d,
+            "cod_to_ch4_kg_d": cod_to_ch4_kg_d,
+            "cod_removal_percent": cod_removal_pct
+        }
+    except Exception as e:
+        logger.warning(f"Could not calculate COD removal: {e}")
+    
     output = {
         "solver_status": str(results.solver.termination_condition),
         "biogas_production_m3d": biogas_m3d,
         "methane_fraction": ch4_frac,
+        "cod_removal": cod_removal_info,
         "digester_performance": digester_metrics,
     }
+    
+    # Add HRT metrics - both effective and design
+    hrt_info = {}
+    try:
+        # Get AD volume (m³)
+        ad_volume_m3 = pyo.value(m.fs.AD.volume_liquid[0]) if hasattr(m.fs.AD, "volume_liquid") else 3400
+        
+        # Get feed flow (m³/d)
+        feed_flow_m3d = pyo.value(m.fs.feed.properties[0].flow_vol) * 86400
+        
+        # Get AD inlet flow (includes recycles) (m³/d)
+        ad_inlet_flow_m3d = pyo.value(m.fs.AD.inlet.flow_vol[0]) * 86400
+        
+        # Calculate HRTs
+        design_hrt_days = ad_volume_m3 / feed_flow_m3d if feed_flow_m3d > 0 else None
+        effective_hrt_days = ad_volume_m3 / ad_inlet_flow_m3d if ad_inlet_flow_m3d > 0 else None
+        recycle_ratio = ad_inlet_flow_m3d / feed_flow_m3d if feed_flow_m3d > 0 else None
+        
+        hrt_info = {
+            "ad_volume_m3": ad_volume_m3,
+            "feed_flow_m3d": feed_flow_m3d,
+            "ad_inlet_flow_m3d": ad_inlet_flow_m3d,
+            "design_hrt_days": design_hrt_days,
+            "effective_hrt_days": effective_hrt_days,
+            "recycle_ratio": recycle_ratio
+        }
+    except Exception as e:
+        logger.warning(f"Could not calculate HRT metrics: {e}")
+    
+    output["hrt_metrics"] = hrt_info
+    
+    # Add comprehensive biomass metrics (MLSS, SRT, net yield)
+    biomass_metrics = {}
+    try:
+        # Get biomass concentrations at digester outlet
+        ad_tss_mg_l = pyo.value(m.fs.AD.liquid_phase.properties_out[0].TSS)
+        ad_vss_mg_l = pyo.value(m.fs.AD.liquid_phase.properties_out[0].VSS)
+        ad_iss_mg_l = ad_tss_mg_l - ad_vss_mg_l  # Inorganic suspended solids
+        
+        # MLSS is the mixed liquor suspended solids (TSS in the digester)
+        mlss_mg_l = ad_tss_mg_l
+        mlvss_mg_l = ad_vss_mg_l
+        
+        # Get biomass inventory in digester (kg)
+        ad_volume_m3 = pyo.value(m.fs.AD.volume_liquid[0]) if hasattr(m.fs.AD, "volume_liquid") else 3400
+        biomass_inventory_kg = ad_volume_m3 * (ad_tss_mg_l / 1000)  # kg TSS
+        biomass_inventory_vss_kg = ad_volume_m3 * (ad_vss_mg_l / 1000)  # kg VSS
+        
+        # Get sludge wasting rate (kg/d)
+        # From dewatering unit if present
+        sludge_wasting_kg_d = 0
+        if hasattr(m.fs, "dewatering"):
+            try:
+                # Sludge flow rate (m³/d)
+                sludge_flow_m3d = pyo.value(m.fs.dewatering.liquid_outlet.flow_vol[0]) * 86400
+                # TSS in sludge (mg/L)
+                sludge_tss_mg_l = pyo.value(m.fs.dewatering.liquid_outlet.conc_mass_comp[0, "X_TSS"]) * 1000
+                sludge_wasting_kg_d = sludge_flow_m3d * (sludge_tss_mg_l / 1000)
+            except:
+                try:
+                    # Alternative: use cake outlet from thickener
+                    cake_flow = pyo.value(m.fs.thickener.underflow.flow_vol[0]) * 86400
+                    cake_tss = pyo.value(m.fs.thickener.underflow.TSS[0])
+                    sludge_wasting_kg_d = cake_flow * (cake_tss / 1000)
+                except:
+                    pass
+        
+        # Calculate SRT (days)
+        srt_days = biomass_inventory_kg / sludge_wasting_kg_d if sludge_wasting_kg_d > 0 else None
+        
+        # Calculate net biomass yield (kg TSS/kg COD)
+        # Get COD applied
+        feed_flow_m3d = pyo.value(m.fs.feed.properties[0].flow_vol) * 86400
+        try:
+            feed_cod_mg_l = pyo.value(m.fs.feed.properties[0].COD) * 1000
+        except:
+            basis_of_design = getattr(m.fs, 'basis_of_design', None)
+            feed_cod_mg_l = basis_of_design.get("cod_mg_l", 50000) if basis_of_design else 50000
+        
+        cod_applied_kg_d = feed_flow_m3d * (feed_cod_mg_l / 1000)
+        
+        # Get COD removed (from methane production)
+        ch4_m3d = biogas_m3d * ch4_frac if (biogas_m3d and ch4_frac) else 0
+        cod_removed_kg_d = ch4_m3d / 0.35  # 0.35 m³ CH4/kg COD
+        
+        # Calculate net yields
+        net_yield_per_cod_applied = sludge_wasting_kg_d / cod_applied_kg_d if cod_applied_kg_d > 0 else None
+        net_yield_per_cod_removed = sludge_wasting_kg_d / cod_removed_kg_d if cod_removed_kg_d > 0 else None
+        
+        # Get detailed biomass composition (all X_ components)
+        biomass_composition = {}
+        particulate_components = [
+            "X_su", "X_aa", "X_fa", "X_c4", "X_pro", "X_ac", "X_h2",  # Active biomass
+            "X_ch", "X_pr", "X_li", "X_I", "X_P", "X_S"  # Composite particulates
+        ]
+        total_biomass_mg_l = 0
+        for comp in particulate_components:
+            try:
+                conc = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp[comp]) * 1000  # mg/L
+                biomass_composition[comp] = conc
+                total_biomass_mg_l += conc
+            except:
+                pass
+        
+        # Calculate active biomass fraction
+        active_biomass = ["X_su", "X_aa", "X_fa", "X_c4", "X_pro", "X_ac", "X_h2"]
+        active_biomass_mg_l = sum(biomass_composition.get(comp, 0) for comp in active_biomass)
+        active_fraction = active_biomass_mg_l / total_biomass_mg_l if total_biomass_mg_l > 0 else 0
+        
+        biomass_metrics = {
+            "mlss_mg_l": mlss_mg_l,
+            "mlvss_mg_l": mlvss_mg_l,
+            "mliss_mg_l": ad_iss_mg_l,
+            "vss_vss_ratio": mlvss_mg_l / mlss_mg_l if mlss_mg_l > 0 else None,
+            "biomass_inventory_kg": biomass_inventory_kg,
+            "biomass_inventory_vss_kg": biomass_inventory_vss_kg,
+            "sludge_wasting_kg_d": sludge_wasting_kg_d,
+            "srt_days": srt_days,
+            "net_yield_kg_tss_per_kg_cod_applied": net_yield_per_cod_applied,
+            "net_yield_kg_tss_per_kg_cod_removed": net_yield_per_cod_removed,
+            "biomass_composition_mg_l": biomass_composition,
+            "total_biomass_mg_l": total_biomass_mg_l,
+            "active_biomass_mg_l": active_biomass_mg_l,
+            "active_biomass_fraction": active_fraction,
+            "cod_applied_kg_d": cod_applied_kg_d,
+            "cod_removed_kg_d": cod_removed_kg_d
+        }
+        
+        logger.info(f"=== BIOMASS METRICS ===")
+        logger.info(f"MLSS: {mlss_mg_l:.1f} mg/L, MLVSS: {mlvss_mg_l:.1f} mg/L")
+        logger.info(f"Biomass inventory: {biomass_inventory_kg:.1f} kg TSS")
+        logger.info(f"Sludge wasting: {sludge_wasting_kg_d:.1f} kg/d")
+        if srt_days:
+            logger.info(f"SRT: {srt_days:.1f} days")
+        if net_yield_per_cod_applied:
+            logger.info(f"Net yield: {net_yield_per_cod_applied:.3f} kg TSS/kg COD applied")
+        if net_yield_per_cod_removed:
+            logger.info(f"Net yield: {net_yield_per_cod_removed:.3f} kg TSS/kg COD removed")
+        logger.info(f"Active biomass fraction: {active_fraction:.2%}")
+        
+    except Exception as e:
+        logger.warning(f"Could not calculate biomass metrics: {e}")
+    
+    output["biomass_metrics"] = biomass_metrics
     
     # Add economic results if available
     if hasattr(m.fs, "costing"):
@@ -2085,9 +2292,17 @@ def solve_flowsheet(
         # Nitrogen mass balance check at MBR
         try:
             # Get S_IN concentrations (kg/m³)
-            S_IN_in = pyo.value(m.fs.MBR.inlet.conc_mass_comp[0, "S_IN"])
-            S_IN_perm = pyo.value(m.fs.MBR.permeate.conc_mass_comp[0, "S_IN"])
-            S_IN_ret = pyo.value(m.fs.MBR.retentate.conc_mass_comp[0, "S_IN"])
+            # Fix indexing: Use component-only for Port or [0, comp] for state block
+            try:
+                # Try Port indexing first (component-only)
+                S_IN_in = pyo.value(m.fs.MBR.inlet.conc_mass_comp["S_IN"])
+                S_IN_perm = pyo.value(m.fs.MBR.permeate.conc_mass_comp["S_IN"])
+                S_IN_ret = pyo.value(m.fs.MBR.retentate.conc_mass_comp["S_IN"])
+            except:
+                # Fall back to state block indexing [time, component]
+                S_IN_in = pyo.value(m.fs.MBR.properties_in[0].conc_mass_comp["S_IN"])
+                S_IN_perm = pyo.value(m.fs.MBR.properties_out[0].conc_mass_comp["S_IN"])
+                S_IN_ret = pyo.value(m.fs.MBR.properties_out[1].conc_mass_comp["S_IN"])
             
             # Get flows (m³/s)
             flow_in = q_in
@@ -2355,28 +2570,11 @@ def simulate_ad_system(
             
             logger.info("Applied comprehensive ADM1 scaling to all state blocks")
             
-            # Scale volumetric constraints for better conditioning
-            # Convert from m³/s to m³/d by scaling by 86400
-            if hasattr(m.fs, "eq_mbr_perm_vol"):
-                try:
-                    iscale.constraint_scaling_transform(m.fs.eq_mbr_perm_vol, 86400)
-                    logger.info("Scaled eq_mbr_perm_vol constraint (m³/s → m³/d)")
-                except Exception as e:
-                    logger.debug(f"Could not scale eq_mbr_perm_vol: {e}")
+            # Volumetric constraints have been removed to avoid over-constraining
+            # No scaling needed for removed constraints
             
-            if hasattr(m.fs, "eq_overall_external_vol_balance"):
-                try:
-                    iscale.constraint_scaling_transform(m.fs.eq_overall_external_vol_balance, 86400)
-                    logger.info("Scaled eq_overall_external_vol_balance constraint (m³/s → m³/d)")
-                except Exception as e:
-                    logger.debug(f"Could not scale eq_overall_external_vol_balance: {e}")
-            
-            # Scale mbr_recovery and split_fraction variables (dimensionless, should be O(1))
-            if hasattr(m.fs, "mbr_recovery"):
-                try:
-                    iscale.set_scaling_factor(m.fs.mbr_recovery, 1.0)
-                except Exception:
-                    pass
+            # MBR recovery is now fixed directly on H2O split fraction
+            # No separate mbr_recovery variable to scale
                 
         except Exception as e:
             logger.debug(f"Scaling factor calculation skipped: {e}")
