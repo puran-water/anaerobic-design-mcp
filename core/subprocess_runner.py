@@ -60,6 +60,10 @@ def filter_simulation_response(
         # Include convergence info if available
         if "convergence_info" in sim_results:
             filtered["convergence_info"] = sim_results["convergence_info"]
+        
+        # ALWAYS include digester performance metrics for diagnosis
+        if "digester_performance" in sim_results:
+            filtered["digester_performance"] = sim_results["digester_performance"]
             
         return filtered
     else:

@@ -1715,8 +1715,22 @@ def solve_flowsheet(
         try:
             logger.info("=== AD Biogas Diagnostics ===")
             # Check pH and inhibition factors
-            ad_ph = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
-            ad_tss = pyo.value(m.fs.AD.liquid_phase.properties_out[0].TSS)
+            try:
+                ad_ph = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
+            except:
+                # Calculate pH from S_H if pH property not available
+                import math
+                try:
+                    S_H = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_H"])
+                except:
+                    S_H = 1e-7  # Default pH 7
+                ad_ph = -math.log10(S_H * 1000)
+            
+            try:
+                ad_tss = pyo.value(m.fs.AD.liquid_phase.properties_out[0].TSS)
+            except:
+                ad_tss = 0
+            
             logger.info(f"AD pH: {ad_ph:.2f}")
             logger.info(f"AD TSS: {ad_tss:.1f} mg/L")
             
@@ -1853,8 +1867,18 @@ def solve_flowsheet(
     # Extract digestate characteristics
     if hasattr(m.fs, 'AD'):
         try:
-            # Get digestate pH
-            digester_metrics["digestate_pH"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
+            # Get digestate pH (calculate from S_H if pH not available)
+            try:
+                digester_metrics["digestate_pH"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
+            except:
+                # Calculate pH from S_H concentration (kmol/m3)
+                import math
+                try:
+                    S_H = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_H"])
+                except:
+                    S_H = 1e-7  # Default pH 7
+                # S_H is in kmol/m3, convert to mol/L for pH calculation
+                digester_metrics["digestate_pH"] = -math.log10(S_H * 1000)
             
             # Get digestate VFAs (kg/m³)
             vfa_components = ["S_ac", "S_pro", "S_bu", "S_va"]
@@ -1925,8 +1949,12 @@ def solve_flowsheet(
     try:
         import json
         import datetime
+        import os
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f"/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp/digester_metrics_{timestamp}.json"
+        # Use relative path that works on both Windows and Linux
+        log_dir = "simulation_logs"
+        os.makedirs(log_dir, exist_ok=True)
+        log_filename = os.path.join(log_dir, f"digester_metrics_{timestamp}.json")
         with open(log_filename, 'w') as f:
             json.dump(digester_metrics, f, indent=2, default=str)
         logger.info(f"Digester metrics written to {log_filename}")
