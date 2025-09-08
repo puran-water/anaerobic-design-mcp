@@ -1778,12 +1778,17 @@ def solve_flowsheet(
                 ad_ph = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
             except:
                 # Calculate pH from S_H if pH property not available
+                # In Modified ADM1 here, S_H is handled via conc_mass_comp with kg/m^3 units.
+                # Since MW(H+) ≈ 1 g/mol, kg/m^3 numerically equals g/L, which equals mol/L.
+                # Therefore, pH = -log10(S_H[kg/m^3]) without any additional factor.
                 import math
                 try:
                     S_H = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_H"])
                 except:
                     S_H = 1e-7  # Default pH 7
-                ad_ph = -math.log10(S_H * 1000)
+                # Guard against log of non-positive due to numerical noise
+                S_H_eff = max(S_H, 1e-20)
+                ad_ph = -math.log10(S_H_eff)
             
             try:
                 ad_tss = pyo.value(m.fs.AD.liquid_phase.properties_out[0].TSS)
@@ -1946,14 +1951,16 @@ def solve_flowsheet(
             try:
                 digester_metrics["digestate_pH"] = pyo.value(m.fs.AD.liquid_phase.properties_out[0].pH)
             except:
-                # Calculate pH from S_H concentration (kmol/m3)
+                # Calculate pH from S_H mass concentration (kg/m^3 ≡ g/L ≡ mol/L for H+)
                 import math
                 try:
                     S_H = pyo.value(m.fs.AD.liquid_phase.properties_out[0].conc_mass_comp["S_H"])
                 except:
                     S_H = 1e-7  # Default pH 7
-                # S_H is in kmol/m3, convert to mol/L for pH calculation
-                digester_metrics["digestate_pH"] = -math.log10(S_H * 1000)
+                S_H_eff = max(S_H, 1e-20)
+                digester_metrics["digestate_pH"] = -math.log10(S_H_eff)
+                # Also report the pH we computed explicitly for cross-checking
+                digester_metrics["digestate_pH_from_S_H"] = digester_metrics["digestate_pH"]
             
             # Get digestate VFAs (kg/m³)
             vfa_components = ["S_ac", "S_pro", "S_bu", "S_va"]
@@ -2064,7 +2071,16 @@ def solve_flowsheet(
     
     # Add MBR results if present
     if hasattr(m.fs, "MBR"):
-        output["mbr_permeate_flow_m3d"] = pyo.value(m.fs.MBR.permeate.flow_vol[0]) * 86400
+        q_in = pyo.value(m.fs.MBR.inlet.flow_vol[0])
+        q_perm = pyo.value(m.fs.MBR.permeate.flow_vol[0])
+        q_ret = pyo.value(m.fs.MBR.retentate.flow_vol[0])
+        
+        output["mbr_inlet_flow_m3d"] = q_in * 86400
+        output["mbr_permeate_flow_m3d"] = q_perm * 86400
+        output["mbr_retentate_flow_m3d"] = q_ret * 86400
+        # Module recovery is defined relative to the MBR inlet, not plant feed
+        # R_module = Q_perm / Q_in
+        output["mbr_module_recovery"] = (q_perm / q_in) if q_in > 0 else None
         
         # Nitrogen mass balance check at MBR
         try:
@@ -2074,9 +2090,9 @@ def solve_flowsheet(
             S_IN_ret = pyo.value(m.fs.MBR.retentate.conc_mass_comp[0, "S_IN"])
             
             # Get flows (m³/s)
-            flow_in = pyo.value(m.fs.MBR.inlet.flow_vol[0])
-            flow_perm = pyo.value(m.fs.MBR.permeate.flow_vol[0])
-            flow_ret = pyo.value(m.fs.MBR.retentate.flow_vol[0])
+            flow_in = q_in
+            flow_perm = q_perm
+            flow_ret = q_ret
             
             # Calculate nitrogen flows (kg/s)
             N_in = flow_in * S_IN_in
