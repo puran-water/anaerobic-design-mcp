@@ -1,0 +1,567 @@
+"""
+QSDsan simulation module for ADM1+sulfur model (30 components, H2S inhibition).
+
+This module provides simulation functions for anaerobic digester design using
+a custom ADM1 extension with sulfate reduction and H2S inhibition.
+
+Key features:
+- 30-component system (27 ADM1 + S_SO4, S_IS, X_SRB)
+- H2S inhibition on methanogens
+- Proper dynamic simulation setup with set_dynamic_tracker
+- Early-stop convergence checking for pseudo-steady-state
+- Dual-HRT validation for design robustness
+
+Based on patterns from adm1_mcp_server/simulation.py but extended for sulfur.
+"""
+
+import numpy as np
+from qsdsan import sanunits as su, WasteStream, System
+from qsdsan.utils import ospath
+import logging
+
+# Import our custom ADM1+sulfur extension
+from utils.qsdsan_sulfur_kinetics import extend_adm1_with_sulfate_and_inhibition
+from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS
+
+# Import pH calculation if available
+try:
+    import sys
+    import os
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    adm1_dir = os.path.join(os.path.dirname(parent_dir), "adm1_mcp_server")
+    sys.path.insert(0, adm1_dir)
+    from calculate_ph_and_alkalinity_fixed import update_ph_and_alkalinity
+except ImportError:
+    logging.warning("pH calculation module not found. Using default pH values.")
+    def update_ph_and_alkalinity(stream):
+        if hasattr(stream, '_pH'):
+            stream._pH = 7.0
+        if hasattr(stream, '_SAlk'):
+            stream._SAlk = 2.5
+        return stream
+
+# Constants
+from chemicals.elements import molecular_weight as get_mw
+C_mw = get_mw({'C': 1})
+N_mw = get_mw({'N': 1})
+
+logger = logging.getLogger(__name__)
+
+
+def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
+    """
+    Create influent WasteStream with 30 ADM1+sulfur components.
+
+    Parameters
+    ----------
+    Q : float
+        Flow rate in m3/d
+    Temp : float
+        Temperature in K
+    adm1_state_30 : dict
+        Dictionary of 30-component concentrations (kg/m3)
+        Must include: 27 standard ADM1 + S_SO4, S_IS, X_SRB
+
+    Returns
+    -------
+    WasteStream
+        Influent stream with calculated pH and alkalinity
+
+    Notes
+    -----
+    - Uses ADM1_SULFUR_CMPS (30 components)
+    - Concentrations expected in kg/m3 (or kg COD/m3 for COD-measured components)
+    - pH and alkalinity calculated based on acid-base equilibria
+    """
+    try:
+        inf = WasteStream('Influent', T=Temp)
+
+        # Set component system (must be done before setting flows)
+        # This is handled by QSDsan when ADM1_SULFUR_CMPS is loaded
+
+        # Prepare concentrations for set_flow_by_concentration
+        concentrations = {}
+
+        # Standard ADM1 components (27)
+        for comp_id in ADM1_SULFUR_CMPS.IDs[:27]:
+            if comp_id in adm1_state_30:
+                concentrations[comp_id] = adm1_state_30[comp_id]
+            else:
+                # Use small default if not specified
+                concentrations[comp_id] = 1e-6
+
+        # Sulfur components (3)
+        concentrations['S_SO4'] = adm1_state_30.get('S_SO4', 0.1)  # 100 mg S/L default
+        concentrations['S_IS'] = adm1_state_30.get('S_IS', 0.001)  # Low initial sulfide
+        concentrations['X_SRB'] = adm1_state_30.get('X_SRB', 0.01)  # Seed population
+
+        # Set flow by concentration
+        inf.set_flow_by_concentration(
+            Q,
+            concentrations=concentrations,
+            units=('m3/d', 'kg/m3')
+        )
+
+        # Calculate pH and alkalinity
+        update_ph_and_alkalinity(inf)
+
+        logger.info(f"Created influent stream: Q={Q} m3/d, T={Temp} K, pH={inf.pH:.2f}")
+
+        return inf
+
+    except Exception as e:
+        raise RuntimeError(f"Error creating influent stream with sulfur: {e}")
+
+
+def initialize_30_component_state(adm1_state_30):
+    """
+    Ensure 30-component state has sensible defaults for sulfur species.
+
+    CRITICAL: Starting with zero sulfate/SRB means inhibition logic stays dormant
+    and SRB processes won't activate. This function ensures realistic initial values.
+
+    Parameters
+    ----------
+    adm1_state_30 : dict
+        Dictionary of component concentrations (kg/m3)
+
+    Returns
+    -------
+    dict
+        Validated state with sulfur species defaults applied
+
+    Notes
+    -----
+    - S_SO4 default: 0.1 kg S/m3 = 100 mg S/L (typical wastewater)
+    - S_IS default: 0.001 kg S/m3 = 1 mg S/L (low initial sulfide)
+    - X_SRB default: 0.01 kg COD/m3 = 10 mg COD/L (seed population)
+
+    These defaults ensure:
+    1. SRB processes can activate immediately
+    2. H2S inhibition can be calculated
+    3. Sulfur mass balance is meaningful
+    """
+    init_conds = adm1_state_30.copy()
+
+    # Check and set sulfate
+    if 'S_SO4' not in init_conds or init_conds['S_SO4'] < 1e-6:
+        init_conds['S_SO4'] = 0.1  # 100 mg S/L
+        logger.info("S_SO4 not specified or too low, using default: 0.1 kg S/m3 (100 mg S/L)")
+
+    # Check and set dissolved sulfide
+    if 'S_IS' not in init_conds or init_conds['S_IS'] < 1e-9:
+        init_conds['S_IS'] = 0.001  # 1 mg S/L
+        logger.info("S_IS not specified or zero, using default: 0.001 kg S/m3 (1 mg S/L)")
+
+    # Check and set SRB biomass
+    if 'X_SRB' not in init_conds or init_conds['X_SRB'] < 1e-6:
+        init_conds['X_SRB'] = 0.01  # 10 mg COD/L
+        logger.info("X_SRB not specified or too low, using default: 0.01 kg COD/m3 (10 mg COD/L)")
+
+    return init_conds
+
+
+def check_steady_state(eff, gas, window=5, tolerance=1e-4):
+    """
+    Check if system reached pseudo-steady-state.
+
+    Examines the last 'window' time points and calculates dC/dt for key components.
+    Returns True if max(|dC/dt|) < tolerance.
+
+    Parameters
+    ----------
+    eff : WasteStream
+        Effluent stream with dynamic tracking enabled
+    gas : WasteStream
+        Biogas stream with dynamic tracking enabled
+    window : int, optional
+        Number of recent time points to check (default 5)
+    tolerance : float, optional
+        Maximum acceptable dC/dt in kg/m3/d (default 1e-4)
+
+    Returns
+    -------
+    bool
+        True if system converged to steady state
+
+    Notes
+    -----
+    - Checks COD, VFA (S_ac), and biomass (X_ac) as key indicators
+    - Uses numerical differentiation on last 'window' points
+    - Early convergence detection saves computation time
+    """
+    try:
+        # Check if dynamic tracking is available
+        if not hasattr(eff, 'scope') or not hasattr(eff.scope, 'record'):
+            logger.warning("Effluent stream missing dynamic tracking data")
+            return False
+
+        # Get time series data
+        t_arr = eff.scope.t_arr
+
+        if len(t_arr) < window + 1:
+            # Not enough data points yet
+            return False
+
+        # Get last 'window' + 1 points for numerical differentiation
+        recent_indices = slice(-window-1, None)
+        t_recent = t_arr[recent_indices]
+
+        # Get component indices
+        try:
+            idx_COD = eff.components.index('S_ac')  # VFA as proxy for COD dynamics
+            idx_biomass = eff.components.index('X_ac')  # Methanogen biomass
+        except ValueError:
+            # Component not found, can't check convergence
+            logger.warning("Required components for convergence check not found")
+            return False
+
+        # Extract concentrations
+        record = eff.scope.record
+        COD_recent = record[recent_indices, idx_COD]
+        biomass_recent = record[recent_indices, idx_biomass]
+
+        # Calculate dC/dt using numerical differentiation
+        dCOD_dt = np.gradient(COD_recent, t_recent)
+        dBiomass_dt = np.gradient(biomass_recent, t_recent)
+
+        # Check if all derivatives are below tolerance
+        max_dCOD_dt = np.max(np.abs(dCOD_dt))
+        max_dBiomass_dt = np.max(np.abs(dBiomass_dt))
+
+        logger.debug(f"Convergence check: max|dCOD/dt|={max_dCOD_dt:.6f}, max|dBiomass/dt|={max_dBiomass_dt:.6f}")
+
+        if max_dCOD_dt < tolerance and max_dBiomass_dt < tolerance:
+            logger.info(f"System converged: max derivatives below {tolerance}")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.warning(f"Error checking steady state: {e}")
+        return False
+
+
+def run_simulation_to_steady_state(sys, eff, gas, max_time=200,
+                                   check_interval=10, t_step=0.1, tolerance=1e-4):
+    """
+    Run simulation until steady state or max_time.
+
+    Performs dynamic simulation in intervals, checking for convergence after each.
+    Stops early if pseudo-steady-state is reached, saving computation time.
+
+    Parameters
+    ----------
+    sys : System
+        QSDsan System object with AnaerobicCSTR
+    eff : WasteStream
+        Effluent stream (must have dynamic tracking)
+    gas : WasteStream
+        Biogas stream (must have dynamic tracking)
+    max_time : float, optional
+        Maximum simulation time in days (default 200)
+    check_interval : float, optional
+        Days between convergence checks (default 10)
+    t_step : float, optional
+        Time step for output in days (default 0.1)
+    tolerance : float, optional
+        Convergence tolerance in kg/m3/d (default 1e-4)
+
+    Returns
+    -------
+    tuple
+        (converged_at, status) where:
+        - converged_at: Time in days when converged (or max_time)
+        - status: 'converged' or 'max_time_reached'
+
+    Notes
+    -----
+    - Uses BDF method (recommended for stiff ODEs in ADM1)
+    - Checks convergence every check_interval days
+    - Returns early if steady state detected
+    - Typical convergence time: 50-150 days for ADM1
+    """
+    t_current = 0
+
+    logger.info(f"Starting simulation to steady state (max {max_time} days, checking every {check_interval} days)")
+
+    while t_current < max_time:
+        t_next = min(t_current + check_interval, max_time)
+
+        logger.debug(f"Simulating from t={t_current} to t={t_next} days")
+
+        try:
+            sys.simulate(
+                state_reset_hook='reset_cache',  # CRITICAL: enables proper ODE solving
+                t_span=(t_current, t_next),
+                t_eval=np.arange(t_current, t_next + t_step, t_step),
+                method='BDF'  # Backward Differentiation Formula for stiff ODEs
+            )
+        except Exception as e:
+            logger.error(f"Simulation failed at t={t_current}: {e}")
+            raise RuntimeError(f"Simulation failed: {e}")
+
+        t_current = t_next
+
+        # Check for convergence
+        if check_steady_state(eff, gas, tolerance=tolerance):
+            logger.info(f"Converged to steady state at t={t_current} days")
+            return t_current, 'converged'
+
+    logger.warning(f"Reached max simulation time ({max_time} days) without full convergence")
+    return t_current, 'max_time_reached'
+
+
+def run_simulation_sulfur(basis, adm1_state_30, HRT, simulation_time=200):
+    """
+    Run single ADM1+sulfur simulation at specified HRT.
+
+    Main simulation function that sets up and runs a dynamic anaerobic digester
+    simulation with the extended ADM1+sulfur model.
+
+    Parameters
+    ----------
+    basis : dict
+        Basis of design containing:
+        - 'Q': Flow rate (m3/d)
+        - 'Temp': Temperature (K)
+        - Other design parameters
+    adm1_state_30 : dict
+        30-component ADM1 state (kg/m3)
+        Must include all 27 ADM1 components + S_SO4, S_IS, X_SRB
+    HRT : float
+        Hydraulic retention time in days
+    simulation_time : float, optional
+        Maximum simulation time in days (default 200)
+
+    Returns
+    -------
+    tuple
+        (sys, inf, eff, gas, converged_at, status) where:
+        - sys: QSDsan System object
+        - inf: Influent WasteStream
+        - eff: Effluent WasteStream
+        - gas: Biogas WasteStream
+        - converged_at: Time converged (days)
+        - status: 'converged' or 'max_time_reached'
+
+    Notes
+    -----
+    **CRITICAL SETUP REQUIREMENTS** (per Codex review):
+    1. Must use set_dynamic_tracker(eff, gas) before simulate()
+    2. Must use state_reset_hook='reset_cache' in simulate()
+    3. Must initialize sulfur components with non-zero values
+    4. Must run until pseudo-steady-state (not just fixed time)
+
+    Without these, streams won't update and results will be wrong!
+    """
+    try:
+        Q = basis['Q']
+        Temp = basis.get('Temp', 308.15)  # Default 35°C
+
+        logger.info(f"=== Starting ADM1+Sulfur Simulation ===")
+        logger.info(f"Q={Q} m3/d, T={Temp} K, HRT={HRT} days")
+
+        # 1. Create extended ADM1+sulfur model
+        logger.info("Creating ADM1+sulfur model (30 components, H2S inhibition)")
+        adm1_sulfur = extend_adm1_with_sulfate_and_inhibition()
+        logger.info(f"Model created with {len(adm1_sulfur)} processes")
+
+        # 2. Create streams with 30 components
+        logger.info("Creating influent stream")
+        inf = create_influent_stream_sulfur(Q, Temp, adm1_state_30)
+        eff = WasteStream('Effluent', T=Temp)
+        gas = WasteStream('Biogas')
+
+        # 3. Create AnaerobicCSTR
+        V_liq = Q * HRT
+        V_gas = V_liq * 0.1  # 10% of liquid volume
+
+        logger.info(f"Creating AnaerobicCSTR: V_liq={V_liq:.1f} m3, V_gas={V_gas:.1f} m3")
+        AD = su.AnaerobicCSTR(
+            'AD',
+            ins=inf,
+            outs=(gas, eff),
+            model=adm1_sulfur,
+            V_liq=V_liq,
+            V_gas=V_gas,
+            T=Temp
+        )
+
+        # 4. Initialize reactor with validated 30-component state
+        logger.info("Initializing reactor with 30-component state")
+        init_conds = initialize_30_component_state(adm1_state_30)
+        AD.set_init_conc(**init_conds)
+        logger.info(f"Initial S_SO4={init_conds['S_SO4']:.4f}, S_IS={init_conds['S_IS']:.6f}, X_SRB={init_conds['X_SRB']:.4f}")
+
+        # 5. Set up dynamic system
+        # CRITICAL FIX: Use None for ID to get unique auto-generated ID
+        # This prevents ValueError on duplicate System IDs in dual-HRT runs
+        logger.info("Setting up dynamic system with tracking")
+        sys = System(None, path=(AD,))  # None = auto-generate unique ID
+
+        # CRITICAL: Enable dynamic tracking for streams to update
+        sys.set_dynamic_tracker(eff, gas)
+        logger.info("Dynamic tracking enabled for effluent and biogas streams")
+
+        # 6. Run simulation to steady state with early stop
+        logger.info("Running simulation to pseudo-steady-state...")
+        converged_at, status = run_simulation_to_steady_state(
+            sys, eff, gas,
+            max_time=simulation_time,
+            check_interval=10,
+            tolerance=1e-4
+        )
+
+        logger.info(f"Simulation complete: {status} at t={converged_at} days")
+
+        # 7. Update pH and alkalinity for effluent
+        logger.info("Calculating final pH and alkalinity")
+        update_ph_and_alkalinity(eff)
+        logger.info(f"Final effluent pH={eff.pH:.2f}, SAlk={eff.SAlk:.3f} meq/L")
+
+        # 8. Log key results
+        logger.info(f"=== Simulation Results ===")
+        logger.info(f"COD in: {inf.COD:.1f} mg/L, COD out: {eff.COD:.1f} mg/L")
+        logger.info(f"COD removal: {(1 - eff.COD/inf.COD)*100:.1f}%")
+        logger.info(f"Biogas production: {gas.F_vol*24:.2f} m3/d")
+
+        return sys, inf, eff, gas, converged_at, status
+
+    except Exception as e:
+        logger.error(f"Simulation failed: {e}")
+        raise RuntimeError(f"Error running ADM1+sulfur simulation: {e}")
+
+
+def assess_robustness(results_design, results_check, threshold=10.0):
+    """
+    Compare performance at design HRT vs check HRT.
+
+    Flags warnings if performance drops significantly (>threshold%) at check HRT,
+    indicating the design may be sensitive to operational variations.
+
+    Parameters
+    ----------
+    results_design : tuple
+        (sys, inf, eff, gas, converged_at, status) at design HRT
+    results_check : tuple
+        (sys, inf, eff, gas, converged_at, status) at check HRT
+    threshold : float, optional
+        Performance drop threshold in % (default 10.0)
+
+    Returns
+    -------
+    list
+        List of warning messages if performance issues detected
+    """
+    warnings = []
+
+    sys_d, inf_d, eff_d, gas_d, t_d, status_d = results_design
+    sys_c, inf_c, eff_c, gas_c, t_c, status_c = results_check
+
+    # COD removal comparison with zero guard
+    if inf_d.COD > 1e-6 and inf_c.COD > 1e-6:
+        cod_removal_design = (1 - eff_d.COD / inf_d.COD) * 100
+        cod_removal_check = (1 - eff_c.COD / inf_c.COD) * 100
+        cod_drop = cod_removal_design - cod_removal_check
+
+        if cod_drop > threshold:
+            warnings.append(
+                f"COD removal drops {cod_drop:.1f}% at increased HRT "
+                f"({cod_removal_design:.1f}% → {cod_removal_check:.1f}%). "
+                f"Design may be sensitive to HRT variations."
+            )
+    else:
+        warnings.append(
+            f"COD removal assessment skipped: influent COD near zero "
+            f"(design: {inf_d.COD:.6f}, check: {inf_c.COD:.6f} mg/L)"
+        )
+
+    # Biogas production comparison with zero guard
+    biogas_design = gas_d.F_vol * 24  # m3/d
+    biogas_check = gas_c.F_vol * 24
+
+    if biogas_design > 1e-6:
+        biogas_change = abs(biogas_design - biogas_check) / biogas_design * 100
+
+        if biogas_change > threshold:
+            warnings.append(
+                f"Biogas production changes {biogas_change:.1f}% at increased HRT "
+                f"({biogas_design:.1f} → {biogas_check:.1f} m3/d)."
+            )
+    else:
+        warnings.append(
+            f"Biogas production assessment skipped: design case produced near-zero biogas "
+            f"({biogas_design:.6f} m3/d). System may have failed."
+        )
+
+    # Convergence comparison
+    if status_d == 'converged' and status_c != 'converged':
+        warnings.append(
+            f"Design HRT converged at {t_d} days but check HRT did not converge. "
+            f"System may be unstable at higher HRT."
+        )
+
+    return warnings
+
+
+def run_dual_hrt_simulation(basis, adm1_state_30, heuristic_config, hrt_variation=0.2):
+    """
+    Run simulation at design HRT and validation HRT.
+
+    Performs two simulations:
+    1. At design HRT from heuristic sizing
+    2. At design HRT * (1 + hrt_variation) for robustness check
+
+    Parameters
+    ----------
+    basis : dict
+        Basis of design with Q, Temp, etc.
+    adm1_state_30 : dict
+        30-component ADM1 state
+    heuristic_config : dict
+        Heuristic sizing results containing digester HRT
+    hrt_variation : float, optional
+        Fractional HRT variation for check (default 0.2 = ±20%)
+
+    Returns
+    -------
+    tuple
+        (results_design, results_check, warnings) where:
+        - results_design: Tuple from run_simulation_sulfur at design HRT
+        - results_check: Tuple from run_simulation_sulfur at check HRT
+        - warnings: List of robustness warnings
+
+    Notes
+    -----
+    This dual-HRT approach addresses Codex's concern about having no safety net
+    if heuristic sizing mis-specifies the retention time. Running at HRT+20%
+    validates that the design isn't sitting on a performance cliff.
+    """
+    HRT_design = heuristic_config['digester']['HRT_days']
+    HRT_check = HRT_design * (1 + hrt_variation)
+
+    logger.info(f"=== Dual-HRT Validation ===")
+    logger.info(f"Design HRT: {HRT_design} days")
+    logger.info(f"Check HRT: {HRT_check} days (+{hrt_variation*100:.0f}%)")
+
+    # Run at design HRT
+    logger.info("Running simulation at design HRT...")
+    results_design = run_simulation_sulfur(basis, adm1_state_30, HRT_design)
+
+    # Run at check HRT
+    logger.info("Running simulation at check HRT...")
+    results_check = run_simulation_sulfur(basis, adm1_state_30, HRT_check)
+
+    # Assess robustness
+    logger.info("Assessing design robustness...")
+    warnings = assess_robustness(results_design, results_check)
+
+    if warnings:
+        logger.warning(f"Robustness issues detected: {len(warnings)} warnings")
+        for warning in warnings:
+            logger.warning(f"  - {warning}")
+    else:
+        logger.info("Design appears robust to HRT variations")
+
+    return results_design, results_check, warnings

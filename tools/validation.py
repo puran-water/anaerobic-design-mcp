@@ -1,103 +1,106 @@
-"""Validation tools for ADM1 state variables."""
+"""Validation tools for ADM1 state variables - CLI Instruction Mode."""
 
 import logging
+import json
+import sys
+from pathlib import Path
 from typing import Dict, Any, Optional
 from core.state import design_state
 from core.utils import coerce_to_dict, to_float
 
-# Always use WaterTAP validation
-from utils.watertap_validation import (
-    validate_adm1_state_with_watertap,
-    calculate_composites_with_watertap,
-    enforce_electroneutrality
-)
-from utils.adm1_validation import calculate_strong_ion_residual
-
 logger = logging.getLogger(__name__)
-logger.info("Using WaterTAP-based validation")
+logger.info("Using QSDsan validation via CLI instructions (FastMCP-compatible)")
 
 
 async def validate_adm1_state(
     adm1_state: Dict[str, Any],
     user_parameters: Dict[str, float],
-    tolerance: float = 0.10,
-    force_store: bool = False,
-    enforce_electroneutrality: bool = True  # NEW parameter
+    tolerance: float = 0.10
 ) -> Dict[str, Any]:
     """
-    Validate ADM1 state variables against composite parameters.
-    
+    Validate ADM1 state variables against composite parameters using QSDsan.
+
+    Returns CLI instructions for manual execution (bypasses FastMCP execution issues).
+
     Args:
-        adm1_state: Dictionary of ADM1 component concentrations
-        user_parameters: Dictionary with measured values
+        adm1_state: Dictionary of ADM1 component concentrations (30 components)
+        user_parameters: Dictionary with measured values (cod_mg_l, tss_mg_l, etc.)
         tolerance: Relative tolerance for validation (default 10%)
-        force_store: If True, store ADM1 state even if validation fails
-        enforce_electroneutrality: If True, auto-adjust S_cat/S_an for charge balance
-    
+
     Returns:
-        Dictionary containing validation results and deviations
+        Dictionary containing CLI execution instructions
     """
     try:
         # Normalize inputs
         adm1_state = coerce_to_dict(adm1_state) or {}
-        
+        user_parameters = coerce_to_dict(user_parameters) or {}
+
         # Clean ADM1 state - handle [value, unit, description] format
         clean_state = {}
         for key, value in adm1_state.items():
             if isinstance(value, list) and len(value) > 0:
                 clean_state[key] = to_float(value[0])
+            elif isinstance(value, dict) and 'value' in value:
+                clean_state[key] = to_float(value['value'])
             else:
                 clean_state[key] = to_float(value)
-        
-        # Use WaterTAP validation
-        validation_result = validate_adm1_state_with_watertap(
-            adm1_state=clean_state,
-            user_parameters=user_parameters,
-            tolerance=tolerance,
-            enforce_balance=enforce_electroneutrality
+
+        # Get temperature
+        temp_c = user_parameters.get('temperature_c', 35.0)
+
+        # Save cleaned ADM1 state to persistent file
+        adm1_file = Path('./adm1_state_cleaned.json')
+        with open(adm1_file, 'w') as f:
+            json.dump(clean_state, f, indent=2)
+
+        # Build CLI command (use relative paths for portability)
+        user_params_json = json.dumps(user_parameters).replace('"', '\\"')
+
+        command = (
+            f"{sys.executable} utils/validate_cli.py validate "
+            f"--adm1-state adm1_state_cleaned.json "
+            f"--user-params '{user_params_json}' "
+            f"--tolerance {tolerance} "
+            f"--temperature-c {temp_c}"
         )
-        # Extract the adjusted state if electroneutrality was enforced
-        if enforce_electroneutrality and validation_result.get("electroneutrality_adjustment", {}).get("adjusted"):
-            # Update clean_state with the adjustment
-            adj_info = validation_result["electroneutrality_adjustment"]
-            clean_state[adj_info["component_adjusted"]] = adj_info["new_value"]
-        
-        # Store in design state if valid or forced
-        if validation_result["valid"] or force_store:
-            design_state.adm1_state = clean_state
-            stored = True
-        else:
-            stored = False
-            
-        # Create message based on validation result
-        if validation_result["valid"]:
-            message = "ADM1 state validation PASSED - all parameters within tolerance"
-        else:
-            message = f"ADM1 state validation FAILED - {len(validation_result.get('warnings', []))} warnings"
-        
-        # Add electroneutrality adjustment info to message if applicable
-        if validation_result.get("electroneutrality_adjustment", {}).get("adjusted"):
-            adj_info = validation_result["electroneutrality_adjustment"]
-            message += f". {adj_info['message']}"
-        
+
+        # Store cleaned state in design_state for future use
+        design_state.adm1_state = clean_state
+
         return {
-            "status": "success",
-            "valid": validation_result["valid"],
-            "calculated_parameters": validation_result["calculated_parameters"],
+            "status": "manual_execution_required",
+            "command": command,
+            "instructions": [
+                "FastMCP cannot execute heavy QSDsan operations reliably.",
+                "Please run the command below in your terminal to validate the ADM1 state:",
+                "",
+                f"  {command}",
+                "",
+                "The command will:",
+                "  1. Load QSDsan components (~18s one-time cost)",
+                "  2. Validate ADM1 state against target composites",
+                "  3. Output JSON with validation results",
+                "",
+                f"ADM1 state saved to: {adm1_file.absolute()}",
+                f"Components: {len(clean_state)} ADM1+sulfur variables"
+            ],
+            "expected_output": {
+                "valid": "boolean - true if all parameters within tolerance",
+                "calculated_parameters": "COD, TSS, VSS, TKN, TP from ADM1 state",
+                "deviations": "Percent deviation for each parameter",
+                "pass_fail": "PASS/FAIL status for each parameter",
+                "warnings": "List of any validation warnings"
+            },
+            "adm1_state_file": str(adm1_file.absolute()),
             "user_parameters": user_parameters,
-            "deviations": validation_result["deviations"],
-            "warnings": validation_result.get("warnings", []),
-            "pass_fail": validation_result["pass_fail"],
-            "stored": stored,
-            "message": message,
-            "electroneutrality_adjustment": validation_result.get("electroneutrality_adjustment", {})
+            "tolerance": tolerance
         }
-        
+
     except Exception as e:
-        logger.error(f"Error in validate_adm1_state: {str(e)}")
+        logger.error(f"Error preparing validation instructions: {str(e)}", exc_info=True)
         return {
             "status": "error",
-            "message": f"Validation failed: {str(e)}"
+            "message": f"Failed to prepare validation instructions: {str(e)}"
         }
 
 
@@ -107,32 +110,57 @@ async def compute_bulk_composites(
 ) -> Dict[str, Any]:
     """
     Compute COD, TSS, VSS, TKN, TP (mg/L) from an ADM1 state.
-    
+
+    Returns CLI instructions for manual execution.
+
     Args:
         adm1_state: ADM1 state dict (accepts [value, unit, note] entries)
         temperature_c: Temperature in Celsius (default 35°C)
-    
+
     Returns:
-        Calculated composite values
+        CLI execution instructions
     """
     try:
         adm1_state = coerce_to_dict(adm1_state) or {}
-        
-        # Clean state
+
+        # Clean state - handle multiple input formats
         clean_state = {}
         for key, value in adm1_state.items():
             if isinstance(value, list) and len(value) > 0:
                 clean_state[key] = to_float(value[0])
+            elif isinstance(value, dict) and 'value' in value:
+                clean_state[key] = to_float(value['value'])
             else:
                 clean_state[key] = to_float(value)
-        
-        # Use WaterTAP
-        temperature_k = 273.15 + temperature_c
-        comps = calculate_composites_with_watertap(clean_state, temperature_k)
-        
-        return {"status": "success", "composites_mg_l": comps}
+
+        # Save cleaned ADM1 state
+        adm1_file = Path('./adm1_state_cleaned.json')
+        with open(adm1_file, 'w') as f:
+            json.dump(clean_state, f, indent=2)
+
+        # Build CLI command (use relative paths for portability)
+        command = (
+            f"{sys.executable} utils/validate_cli.py composites "
+            f"--adm1-state adm1_state_cleaned.json "
+            f"--temperature-c {temperature_c}"
+        )
+
+        return {
+            "status": "manual_execution_required",
+            "command": command,
+            "instructions": [
+                "Please run the command below to compute bulk composites:",
+                "",
+                f"  {command}",
+                "",
+                "Output: JSON with COD, TSS, VSS, TKN, TP (mg/L)"
+            ],
+            "adm1_state_file": str(adm1_file.absolute()),
+            "temperature_c": temperature_c
+        }
+
     except Exception as e:
-        logger.error(f"Error in compute_bulk_composites: {e}")
+        logger.error(f"Error preparing composites instructions: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 
@@ -140,71 +168,64 @@ async def check_strong_ion_balance(
     adm1_state: Dict[str, Any],
     ph: float = 7.0,
     max_imbalance_percent: float = 5.0,
-    auto_fix: bool = False
+    use_current_adm1: bool = True
 ) -> Dict[str, Any]:
     """
     Check strong-ion charge balance consistency vs pH.
-    
+
+    Returns CLI instructions for manual execution.
+    Automatically includes all 30 ADM1+sulfur components including SO4²⁻, HS⁻, S²⁻
+
     Args:
         adm1_state: ADM1 state dict
         ph: pH to use for acid-base speciation
         max_imbalance_percent: Threshold for pass/fail
-        auto_fix: If True, return corrected state with electroneutrality
-    
+        use_current_adm1: Use ADM1 state from design_state (default True)
+
     Returns:
-        Status, residual metrics, pass/fail recommendation
+        CLI execution instructions
     """
     try:
         adm1_state = coerce_to_dict(adm1_state) or {}
-        
-        # Clean state
+
+        # Clean state - handle multiple input formats
         clean_state = {}
         for key, value in adm1_state.items():
             if isinstance(value, list) and len(value) > 0:
                 clean_state[key] = to_float(value[0])
+            elif isinstance(value, dict) and 'value' in value:
+                clean_state[key] = to_float(value['value'])
             else:
                 clean_state[key] = to_float(value)
-        
-        if auto_fix:
-            # Use WaterTAP's electroneutrality enforcement
-            corrected_state, adjustment_info = enforce_electroneutrality(
-                clean_state, target_ph=ph
-            )
-            
-            # Still calculate the balance for reporting
-            result = calculate_strong_ion_residual(corrected_state, ph)
-            
-            return {
-                "status": "success",
-                "residual_meq_l": result["residual_meq_l"],
-                "total_cations_meq_l": result["cations"]["total"],
-                "total_anions_meq_l": result["anions"]["total"],
-                "imbalance_percent": result["imbalance_percent"],
-                "balanced": result["balanced"],
-                "cations": result["cations"],
-                "anions": result["anions"],
-                "suggestion": result.get("suggestion", ""),
-                "message": f"Charge imbalance: {result['imbalance_percent']:.1f}% ({'PASS' if result['balanced'] else 'FAIL'})",
-                "corrected_state": corrected_state if auto_fix else None,
-                "adjustment_info": adjustment_info if auto_fix else None
-            }
-        else:
-            # Use existing calculation
-            result = calculate_strong_ion_residual(clean_state, ph)
-            
-            # The function already returns all needed fields
-            return {
-                "status": "success",
-                "residual_meq_l": result["residual_meq_l"],
-                "total_cations_meq_l": result["cations"]["total"],
-                "total_anions_meq_l": result["anions"]["total"],
-                "imbalance_percent": result["imbalance_percent"],
-                "balanced": result["balanced"],
-                "cations": result["cations"],
-                "anions": result["anions"],
-                "suggestion": result.get("suggestion", ""),
-                "message": f"Charge imbalance: {result['imbalance_percent']:.1f}% ({'PASS' if result['balanced'] else 'FAIL'})"
-            }
+
+        # Save cleaned ADM1 state
+        adm1_file = Path('./adm1_state_cleaned.json')
+        with open(adm1_file, 'w') as f:
+            json.dump(clean_state, f, indent=2)
+
+        # Build CLI command (use relative paths for portability)
+        command = (
+            f"{sys.executable} utils/validate_cli.py ion-balance "
+            f"--adm1-state adm1_state_cleaned.json "
+            f"--ph {ph} "
+            f"--temperature-c 35.0"
+        )
+
+        return {
+            "status": "manual_execution_required",
+            "command": command,
+            "instructions": [
+                "Please run the command below to check ion balance:",
+                "",
+                f"  {command}",
+                "",
+                "Output: JSON with charge balance analysis (residual, imbalance %, balanced status)"
+            ],
+            "adm1_state_file": str(adm1_file.absolute()),
+            "ph": ph,
+            "max_imbalance_percent": max_imbalance_percent
+        }
+
     except Exception as e:
-        logger.error(f"Error in check_strong_ion_balance: {e}")
+        logger.error(f"Error preparing ion balance instructions: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}

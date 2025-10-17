@@ -192,7 +192,7 @@ class SimulationConfig:
     enable_diagnostics: bool = False
     dump_near_zero_vars: bool = False
     # SD controls
-    sd_iter_lim: int = 20
+    sd_iter_lim: int = 1
     sd_tol: float = 1e-6
     
     def __post_init__(self):
@@ -538,6 +538,18 @@ def _build_common_components(
     # Fix liquid outlet temperature (assume isothermal)
     _fix_or_set(m.fs.AD.liquid_outlet.temperature, temp_k * pyo.units.K, label="AD.liquid_outlet.temperature")
     
+    # Add MLSS constraints with proper units for AD liquid phase
+    # Target: 10-15 kg/m³ (operational requirement for MBR flux management)
+    @m.fs.Constraint(doc="AD MLSS lower bound")
+    def eq_AD_mlss_lower(b):
+        return b.AD.liquid_phase.properties_out[0].TSS >= 10.0 * pyo.units.kg/pyo.units.m**3
+
+    @m.fs.Constraint(doc="AD MLSS upper bound")  
+    def eq_AD_mlss_upper(b):
+        return b.AD.liquid_phase.properties_out[0].TSS <= 15.0 * pyo.units.kg/pyo.units.m**3
+
+    logger.info("Added MLSS constraints: 10-15 kg/m³ for AD liquid phase")
+    
     # Ensure strictly positive S_H and good initial pH on AD properties to prevent log10 errors
     if hasattr(m.fs, "AD") and hasattr(m.fs.AD, "liquid_phase"):
         # AD is steady-state, so access properties at time 0 directly
@@ -747,19 +759,25 @@ def _build_low_tss_mbr_flowsheet(
             f"Computed dewatering fraction (by volume): {dewatering_fraction} = {daily_waste_m3d}/{total_ad_flow_m3d}"
         )
     
-    # Fix split fraction to expected value from heuristics
-    # This is needed to close DOF properly
-    # The fraction sends ~333 m³/d to dewatering out of ~5333 m³/d total
+    # CRITICAL CHANGE: Unfix splitter fraction to let MLSS constraints determine wasting
+    # This resolves DOF = -1 issue while maintaining operational MLSS target
     try:
-        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].fix(dewatering_fraction)
-        logger.info(f"Fixed AD splitter fraction to {dewatering_fraction:.4f}")
+        # Unfix to allow optimization based on MLSS constraint
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].unfix()
+        # Set reasonable bounds for sludge wasting (1-8% typical for MBR systems)
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setlb(0.01)   # Min 1%
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setub(0.08)   # Max 8%
+        # Use heuristic value as initial guess
+        m.fs.ad_splitter.split_fraction[0, "to_dewatering"].set_value(dewatering_fraction)
+        logger.info(f"AD splitter fraction UNFIXED for MLSS control, bounds [0.01, 0.08], initial {dewatering_fraction:.4f}")
     except Exception as e:
         logger.warning(f"Could not fix splitter fraction: {e}")
         # If we can't fix it, at least set value and bounds
         try:
             m.fs.ad_splitter.split_fraction[0, "to_dewatering"].set_value(dewatering_fraction)
-            m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setlb(1e-4)
-            m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setub(0.8)
+            # TIGHTENED BOUNDS: More realistic range to prevent extreme splits
+            m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setlb(0.001)  # Was 1e-4
+            m.fs.ad_splitter.split_fraction[0, "to_dewatering"].setub(0.5)    # Was 0.8
         except Exception:
             pass
     
@@ -825,6 +843,11 @@ def _build_low_tss_mbr_flowsheet(
     # Set lower bounds to keep flows strictly positive and away from degenerate solution
     m.fs.MBR.permeate.flow_vol[0].setlb(1e-4)  # 8.64 m³/d minimum
     m.fs.MBR.retentate.flow_vol[0].setlb(1e-3)  # 86.4 m³/d minimum
+    
+    # ADD UPPER BOUNDS to prevent unbounded growth and improve convergence
+    m.fs.MBR.inlet.flow_vol[0].setub(10.0 * feed_flow_m3s)    # Max 10Q total
+    m.fs.MBR.permeate.flow_vol[0].setub(2.0 * feed_flow_m3s)  # Max 2Q permeate
+    m.fs.MBR.retentate.flow_vol[0].setub(8.0 * feed_flow_m3s) # Max 8Q retentate
 
     # Optional: enforce minimum MBR inlet/permeate flows to escape low-flow basin
     # Enabled via heuristic_config['diagnostics']['force_mbr_min_constraints'] = True
@@ -865,9 +888,12 @@ def _build_low_tss_mbr_flowsheet(
     # (i.e., 1=rejection, 0=passage). If this pattern is detected (soluble near 0 and
     # particulate near 1), auto-convert unless explicitly disabled.
     try:
-        auto_correct = bool(mbr_cfg.get("auto_correct_sigma", True))
+        # CRITICAL FIX: Default to False to prevent unexpected NH4+ retention
+        # This ensures sigma values are interpreted as passage coefficients (1=pass)
+        # unless user explicitly requests reflection semantics
+        auto_correct = bool(mbr_cfg.get("auto_correct_sigma", False))
     except Exception:
-        auto_correct = True
+        auto_correct = False  # Keep False even on exception to prevent NH4+ trap
 
     try:
         if auto_correct and sigma_soluble <= 0.05 and sigma_partic >= 0.95:
@@ -937,18 +963,43 @@ def _build_low_tss_mbr_flowsheet(
         rule=lambda b, j: b.MBR.split_fraction[0, "permeate", j] == 
                          b.mbr_sigma[j] * b.MBR.split_fraction[0, "permeate", "H2O"]
     )
+    # Provide explicit scaling for custom constraints to satisfy IDAES scaling checks
+    try:
+        for j in components_to_constrain:
+            iscale.constraint_scaling_transform(m.fs.eq_mbr_split[j], 1.0)
+    except Exception:
+        pass
     
     logger.info(f"Applied sieving coefficient approach (passage): σ_soluble={sigma_soluble}, σ_particulate={sigma_partic}")
 
-    # Extra visibility for ammonia handling
+    # P1: Runtime verification of S_NH4 split constraint
     try:
-        if any(str(j) == "S_IN" for j in m.fs.props_ASM2D.component_list):
+        if "S_NH4" in m.fs.props_ASM2D.component_list:
+            # Check initial values
+            nh4_split = pyo.value(m.fs.MBR.split_fraction[0, "permeate", "S_NH4"])
+            h2o_split = pyo.value(m.fs.MBR.split_fraction[0, "permeate", "H2O"])
+            sigma_nh4 = pyo.value(m.fs.mbr_sigma["S_NH4"])
+            expected = sigma_nh4 * h2o_split
+            
             logger.info(
-                f"MBR S_IN passage coefficient (relative to water) set to σ={sigma_soluble}. "
-                "S_IN will follow H2O split if σ≈1.0 and be rejected if σ≈0.0."
+                f"P1 Verification: S_NH4 split = {nh4_split:.4f}, "
+                f"H2O split = {h2o_split:.4f}, σ_NH4 = {sigma_nh4:.4f}, "
+                f"expected = {expected:.4f}"
             )
-    except Exception:
-        pass
+            
+            if abs(nh4_split - expected) > 1e-6:
+                logger.warning(
+                    f"P1: S_NH4 not following water split initially! "
+                    f"Deviation = {abs(nh4_split - expected):.6f}"
+                )
+            else:
+                logger.info("P1: S_NH4 correctly following water split constraint")
+        else:
+            logger.warning("P1: S_NH4 not found in ASM2D component list - using S_IN instead")
+            if "S_IN" in m.fs.props_ASM2D.component_list:
+                logger.info(f"MBR S_IN passage coefficient set to σ={sigma_soluble}")
+    except Exception as e:
+        logger.debug(f"P1: Could not verify nitrogen split: {e}")
     
     # Translator for MBR retentate back to ADM1
     m.fs.translator_ASM_AD_mbr = Translator_ASM2d_ADM1(
@@ -1058,14 +1109,51 @@ def _build_low_tss_mbr_flowsheet(
         inlet_list=["fresh_feed", "mbr_recycle", "centrate_recycle"]
     )
 
-    # Overall external volume balance: P + U = F
-    # DIAGNOSTIC ONLY - Commented out to avoid over-constraining
-    # The balance emerges naturally from component mass balances
-    # Note: This means if underflow is 27 m³/d, permeate will be 973 m³/d, not 1000
-    # m.fs.eq_overall_external_vol_balance = pyo.Constraint(
-    #     expr=m.fs.MBR.permeate.flow_vol[0] + m.fs.dewatering.underflow.flow_vol[0] ==
-    #          m.fs.feed.properties[0].flow_vol
-    # )
+    # Overall external volume balance: P + U = F (anchors flows and prevents volumetric drift)
+    m.fs.eq_overall_external_vol_balance = pyo.Constraint(
+        expr=m.fs.MBR.permeate.flow_vol[0] + m.fs.dewatering.underflow.flow_vol[0] ==
+             m.fs.feed.properties[0].flow_vol
+    )
+    # Scale the volumetric balance by feed flow (dimensionless O(1) equation)
+    try:
+        _Qf = float(basis_of_design.get("feed_flow_m3d", 1000.0)) / 86400.0
+        if _Qf > 0:
+            iscale.constraint_scaling_transform(m.fs.eq_overall_external_vol_balance, 1.0/_Qf)
+    except Exception:
+        pass
+    
+    # Add SRT monitoring expressions for operational visibility
+    # SRT = (TSS in digester × volume) / (net biomass production rate)
+    @m.fs.Expression(doc="Biomass inventory in AD (kg)")
+    def biomass_inventory(b):
+        return (b.AD.liquid_phase.properties_out[0].TSS * 
+                b.AD.volume_liquid[0])
+    
+    @m.fs.Expression(doc="Net biomass production rate (kg/s)")
+    def net_biomass_production(b):
+        # Biomass leaving via dewatering underflow
+        # For modified_ASM2D, use TSS expression instead of X_TSS component
+        if hasattr(b.dewatering.underflow_state[0], 'TSS'):
+            # Use TSS expression for modified_ASM2D
+            return (b.dewatering.underflow_state[0].TSS * 
+                    b.dewatering.underflow.flow_vol[0])
+        else:
+            # Fallback: sum all particulate components
+            tss_conc = sum(b.dewatering.underflow.conc_mass_comp[0, comp]
+                          for comp in ["X_I", "X_S", "X_H", "X_PAO", "X_AUT", "X_PHA", "X_PP"]
+                          if (0, comp) in b.dewatering.underflow.conc_mass_comp)
+            return tss_conc * b.dewatering.underflow.flow_vol[0]
+    
+    @m.fs.Expression(doc="Solids Retention Time (days)")
+    def SRT_days(b):
+        # Avoid division by zero with small epsilon
+        eps = 1e-10 * pyo.units.kg / pyo.units.s
+        return (b.biomass_inventory / 
+                (b.net_biomass_production + eps)) * (1.0 * pyo.units.day / pyo.units.s)
+    
+    @m.fs.Expression(doc="MLSS in AD (mg/L)")
+    def AD_MLSS_mg_L(b):
+        return b.AD.liquid_phase.properties_out[0].TSS * 1000.0  # Convert kg/m³ to mg/L
     
     # Connect streams to mixer
     m.fs.arc_feed_mixer = Arc(
@@ -1200,6 +1288,17 @@ def _safe_initialize_ad(m: pyo.ConcreteModel) -> None:
         return
     ad = m.fs.AD
     
+    # ROBUSTNESS IMPROVEMENT: Temporarily relax ammonia inhibition for initial solve
+    original_K_I_nh3 = None
+    try:
+        if hasattr(m.fs, "rxn_ADM1") and hasattr(m.fs.rxn_ADM1, "K_I_nh3"):
+            original_K_I_nh3 = pyo.value(m.fs.rxn_ADM1.K_I_nh3)
+            # Increase tolerance 10x to reduce inhibition during initialization
+            m.fs.rxn_ADM1.K_I_nh3.set_value(original_K_I_nh3 * 10.0)
+            logger.info(f"Temporarily relaxed K_I_nh3 from {original_K_I_nh3:.4f} to {original_K_I_nh3 * 10.0:.4f} for initialization")
+    except Exception as e:
+        logger.debug(f"Could not relax K_I_nh3: {e}")
+    
     # Helper: aggressively ensure unit-level DoF == 0 by fixing AD.inlet
     def _fix_ad_inlet_from(port_src) -> None:
         try:
@@ -1317,6 +1416,14 @@ def _safe_initialize_ad(m: pyo.ConcreteModel) -> None:
     finally:
         # Always unfix AD.inlet state after initialization attempts
         _unfix_ad_inlet()
+        
+        # Restore original K_I_nh3 value after initialization
+        if original_K_I_nh3 is not None:
+            try:
+                m.fs.rxn_ADM1.K_I_nh3.set_value(original_K_I_nh3)
+                logger.info(f"Restored K_I_nh3 to original value: {original_K_I_nh3:.4f}")
+            except Exception as e:
+                logger.debug(f"Could not restore K_I_nh3: {e}")
 
 
 def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: bool = True) -> None:
@@ -1549,27 +1656,48 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
             except Exception as e:
                 logger.debug(f"Optional pre-SD propagate_state skipped: {e}")
 
-            # Phased initialization strategy
-            # Phase 1: Temporarily fix splitter to expected ratio to help convergence
+            # Phased initialization strategy with MLSS constraint handling
+            # Phase 1: Temporarily deactivate MLSS constraints and fix splitter
+            mlss_constraints_deactivated = False
+            if hasattr(m.fs, 'eq_AD_mlss_lower') and hasattr(m.fs, 'eq_AD_mlss_upper'):
+                try:
+                    m.fs.eq_AD_mlss_lower.deactivate()
+                    m.fs.eq_AD_mlss_upper.deactivate()
+                    mlss_constraints_deactivated = True
+                    logger.info("Phase 1: Temporarily deactivated MLSS constraints for initialization")
+                except Exception as e:
+                    logger.debug(f"Could not deactivate MLSS constraints: {e}")
+            
             if hasattr(m.fs, 'ad_splitter'):
-                # Expected: ~333 m³/d to dewatering out of ~5333 m³/d AD outlet
-                expected_split = 333.0 / 5333.0  # ≈ 0.062
+                # Calculate expected split based on target MLSS (12.5 kg/m³ midpoint)
+                # With typical yield ~0.1 kg TSS/kg COD and SRT 30 days
+                # Split fraction ≈ 1/SRT for steady state
+                expected_split = 1.0 / 30.0  # ≈ 0.033 for 30-day SRT
                 try:
                     m.fs.ad_splitter.split_fraction[0, "to_dewatering"].fix(expected_split)
                     logger.info(f"Phase 1: Fixed ad_splitter dewatering fraction to {expected_split:.3f}")
                 except Exception as e:
                     logger.debug(f"Could not fix splitter fraction: {e}")
             
-            # Phase 2: Run Sequential Decomposition with fixed splitter
+            # Phase 2: Run Sequential Decomposition with relaxed constraints
             seq.run(m, _init_unit_callback)
             
-            # Phase 3: Release splitter for final flexibility
+            # Phase 3: Release splitter and reactivate MLSS constraints
             if hasattr(m.fs, 'ad_splitter'):
                 try:
                     m.fs.ad_splitter.split_fraction[0, "to_dewatering"].unfix()
                     logger.info("Phase 3: Released ad_splitter fraction for final solve")
                 except Exception as e:
                     logger.debug(f"Could not unfix splitter fraction: {e}")
+            
+            # Reactivate MLSS constraints after initialization
+            if mlss_constraints_deactivated:
+                try:
+                    m.fs.eq_AD_mlss_lower.activate()
+                    m.fs.eq_AD_mlss_upper.activate()
+                    logger.info("Phase 3: Reactivated MLSS constraints for final solve")
+                except Exception as e:
+                    logger.debug(f"Could not reactivate MLSS constraints: {e}")
 
             # Snapshot of key flows post-initialization for diagnostics
             try:
@@ -1722,6 +1850,70 @@ def initialize_flowsheet(m: pyo.ConcreteModel, use_sequential_decomposition: boo
         _apply_feed_state(m, m.fs._final_adm1_state)
 
 
+def audit_translator_nitrogen(m: pyo.ConcreteModel, logger) -> None:
+    """
+    P1: Audit nitrogen conservation across all translators.
+    
+    This function checks if nitrogen is being properly mapped between
+    ADM1 (S_IN) and ASM2D (S_NH4) in all translators. Scaling issues
+    or incorrect mapping can cause artificial TAN accumulation.
+    """
+    translator_pairs = [
+        ("translator_AD_ASM", "S_IN", "S_NH4"),
+        ("translator_ASM_AD_mbr", "S_NH4", "S_IN"),
+        ("translator_dewatering_ASM", "S_IN", "S_NH4"),
+        ("translator_centrate_AD", "S_NH4", "S_IN")
+    ]
+    
+    issues_found = False
+    
+    for trans_name, in_comp, out_comp in translator_pairs:
+        if hasattr(m.fs, trans_name):
+            trans = getattr(m.fs, trans_name)
+            try:
+                # Get inlet/outlet nitrogen concentrations
+                if hasattr(trans, "properties_in") and hasattr(trans, "properties_out"):
+                    n_in = pyo.value(trans.properties_in[0].conc_mass_comp.get(in_comp, 0))
+                    n_out = pyo.value(trans.properties_out[0].conc_mass_comp.get(out_comp, 0))
+                elif hasattr(trans, "inlet") and hasattr(trans, "outlet"):
+                    n_in = pyo.value(trans.inlet.conc_mass_comp.get(in_comp, 0))
+                    n_out = pyo.value(trans.outlet.conc_mass_comp.get(out_comp, 0))
+                else:
+                    continue
+                
+                # Check for scaling issues
+                if n_in > 1e-10:
+                    ratio = n_out / n_in
+                    
+                    if ratio > 2.0 or ratio < 0.5:
+                        logger.warning(
+                            f"P1 CRITICAL: {trans_name} nitrogen scaling issue! "
+                            f"{in_comp}={n_in:.4f} → {out_comp}={n_out:.4f} kg/m³ "
+                            f"(ratio={ratio:.2f}, expected ~1.0)"
+                        )
+                        issues_found = True
+                    else:
+                        logger.debug(
+                            f"P1: {trans_name} N mapping OK: "
+                            f"{in_comp}={n_in:.4f} → {out_comp}={n_out:.4f} kg/m³"
+                        )
+                else:
+                    logger.debug(f"P1: {trans_name} has near-zero nitrogen")
+                    
+            except Exception as e:
+                logger.debug(f"P1: Could not audit {trans_name}: {e}")
+    
+    if issues_found:
+        logger.error(
+            "P1: Translator nitrogen mapping issues detected! "
+            "This is likely causing the TAN accumulation."
+        )
+    else:
+        logger.info("P1: All translator nitrogen mappings appear correct")
+    
+    return None
+
+
 def solve_flowsheet(
     m: pyo.ConcreteModel,
     tee: bool = True,
@@ -1738,11 +1930,18 @@ def solve_flowsheet(
     solver.options["max_iter"] = 500                       # Sufficient for complex systems
     solver.options["mu_strategy"] = "adaptive"
     solver.options["mu_init"] = 1e-8                       # Per Codex recommendation
-    solver.options["bound_push"] = 1e-10                   # Tighter for stiff systems
+    solver.options["bound_push"] = 1e-8                    # Relaxed for stiff recycle systems
     solver.options["bound_frac"] = 0.01                    # Fraction of bound distance
     solver.options["bound_relax_factor"] = 0               # No bound relaxation
     solver.options["tol"] = 1e-8                           # Start tight, can relax to 1e-6
     solver.options["compl_inf_tol"] = 1e-6                 # Complementarity tolerance
+    
+    # ENHANCED OPTIONS for infeasible/difficult problems
+    solver.options["acceptable_tol"] = 1e-6                # Fallback tolerance
+    solver.options["acceptable_iter"] = 15                 # Allow acceptable point after 15 iters
+    solver.options["expect_infeasible_problem"] = "yes"    # Prepare for potential infeasibility
+    solver.options["print_info_string"] = "yes"            # More diagnostic output
+    
     # Try to use HSL linear solver if available (ma57 or ma27)
     try:
         solver.options["linear_solver"] = "ma57"
@@ -2291,18 +2490,33 @@ def solve_flowsheet(
         
         # Nitrogen mass balance check at MBR
         try:
-            # Get S_IN concentrations (kg/m³)
+            # P1 Fix: Determine correct nitrogen component based on property package
+            # ASM2D uses S_NH4, ADM1 uses S_IN
+            if "S_NH4" in m.fs.props_ASM2D.component_list:
+                n_component = "S_NH4"
+            elif "S_IN" in m.fs.props_ASM2D.component_list:
+                n_component = "S_IN"
+            else:
+                n_component = None
+                logger.warning("P1: No nitrogen component found in ASM2D property package")
+            
+            if not n_component:
+                raise ValueError("Cannot find nitrogen component (S_NH4 or S_IN) in ASM2D")
+            
+            logger.debug(f"P1: Using {n_component} for nitrogen balance check")
+            
+            # Get nitrogen concentrations (kg/m³) using correct component
             # Fix indexing: Use component-only for Port or [0, comp] for state block
             try:
                 # Try Port indexing first (component-only)
-                S_IN_in = pyo.value(m.fs.MBR.inlet.conc_mass_comp["S_IN"])
-                S_IN_perm = pyo.value(m.fs.MBR.permeate.conc_mass_comp["S_IN"])
-                S_IN_ret = pyo.value(m.fs.MBR.retentate.conc_mass_comp["S_IN"])
+                N_in_conc = pyo.value(m.fs.MBR.inlet.conc_mass_comp[n_component])
+                N_perm_conc = pyo.value(m.fs.MBR.permeate.conc_mass_comp[n_component])
+                N_ret_conc = pyo.value(m.fs.MBR.retentate.conc_mass_comp[n_component])
             except:
                 # Fall back to state block indexing [time, component]
-                S_IN_in = pyo.value(m.fs.MBR.properties_in[0].conc_mass_comp["S_IN"])
-                S_IN_perm = pyo.value(m.fs.MBR.properties_out[0].conc_mass_comp["S_IN"])
-                S_IN_ret = pyo.value(m.fs.MBR.properties_out[1].conc_mass_comp["S_IN"])
+                N_in_conc = pyo.value(m.fs.MBR.mixed_state[0].conc_mass_comp[n_component])
+                N_perm_conc = pyo.value(m.fs.MBR.permeate_state[0].conc_mass_comp[n_component])
+                N_ret_conc = pyo.value(m.fs.MBR.retentate_state[0].conc_mass_comp[n_component])
             
             # Get flows (m³/s)
             flow_in = q_in
@@ -2310,16 +2524,16 @@ def solve_flowsheet(
             flow_ret = q_ret
             
             # Calculate nitrogen flows (kg/s)
-            N_in = flow_in * S_IN_in
-            N_perm = flow_perm * S_IN_perm
-            N_ret = flow_ret * S_IN_ret
+            N_in = flow_in * N_in_conc
+            N_perm = flow_perm * N_perm_conc
+            N_ret = flow_ret * N_ret_conc
             
             # Check balance
             residual = abs(N_in - N_perm - N_ret)
             residual_percent = 100 * residual / max(N_in, 1e-10)
             
-            # Calculate passage fraction for S_IN
-            passage_S_IN = N_perm / max(N_in, 1e-10)
+            # Calculate passage fraction for nitrogen component
+            passage_N = N_perm / max(N_in, 1e-10)
             passage_H2O = flow_perm / max(flow_in, 1e-10)
             
             # Expected passage based on sigma_soluble
@@ -2328,24 +2542,25 @@ def solve_flowsheet(
             expected_passage = sigma_soluble * passage_H2O
             
             output["nitrogen_balance"] = {
-                "S_IN_inlet_kg_m3": S_IN_in,
-                "S_IN_permeate_kg_m3": S_IN_perm,
-                "S_IN_retentate_kg_m3": S_IN_ret,
+                "nitrogen_component": n_component,
+                f"{n_component}_inlet_kg_m3": N_in_conc,
+                f"{n_component}_permeate_kg_m3": N_perm_conc,
+                f"{n_component}_retentate_kg_m3": N_ret_conc,
                 "N_flow_in_kg_d": N_in * 86400,
                 "N_flow_permeate_kg_d": N_perm * 86400,
                 "N_flow_retentate_kg_d": N_ret * 86400,
                 "mass_balance_error_percent": residual_percent,
-                "S_IN_passage_fraction": passage_S_IN,
+                f"{n_component}_passage_fraction": passage_N,
                 "H2O_passage_fraction": passage_H2O,
-                "expected_S_IN_passage": expected_passage,
-                "anomalous_rejection": abs(passage_S_IN - expected_passage) > 0.1
+                f"expected_{n_component}_passage": expected_passage,
+                "anomalous_rejection": abs(passage_N - expected_passage) > 0.1
             }
             
             # Log warning if nitrogen is being rejected anomalously
-            if abs(passage_S_IN - expected_passage) > 0.1:
+            if abs(passage_N - expected_passage) > 0.1:
                 logger.warning(
-                    f"Anomalous S_IN rejection detected at MBR: "
-                    f"passage={passage_S_IN:.3f} vs expected={expected_passage:.3f}. "
+                    f"P1: Anomalous {n_component} rejection detected at MBR: "
+                    f"passage={passage_N:.3f} vs expected={expected_passage:.3f}. "
                     f"This can cause TAN accumulation."
                 )
             
@@ -2479,7 +2694,10 @@ def simulate_ad_system(
 
         # Apply default scaling factors for improved numerical stability
         try:
-            iscale.calculate_scaling_factors(m)
+            # ------------------------------------------------------------------
+            # Manual pre-scaling: define robust scaling on key state variables
+            # prior to automatic calculation to avoid "missing scaling" warnings.
+            # ------------------------------------------------------------------
             
             # Apply comprehensive scaling to ALL ADM1 state blocks
             # This is critical for convergence with components spanning 12 orders of magnitude
@@ -2490,7 +2708,8 @@ def simulate_ad_system(
                     
                 # S_H scaling (pH ~7 means S_H ~1e-7)
                 if hasattr(blk, "S_H"):
-                    iscale.set_scaling_factor(blk.S_H, 1e8)
+                    # Follow WaterTAP/IDAES guidance (1e5–1e8). Choose conservative 1e6.
+                    iscale.set_scaling_factor(blk.S_H, 1e6)
                     blk.S_H.setlb(1e-14)  # Strict lower bound
                     blk.S_H.setub(1e-3)   # Upper bound to prevent pH excursions
                 
@@ -2506,8 +2725,49 @@ def simulate_ad_system(
                     for comp, factor in [("S_h2", 1e5), ("S_ch4", 1e5), ("S_co2", 1e3)]:
                         if (0, comp) in blk.conc_mass_comp:
                             iscale.set_scaling_factor(blk.conc_mass_comp[0, comp], factor)
+
+            def apply_asm2d_scaling(blk):
+                """Apply scaling to any ASM2D state block
+
+                Heuristics (kg/m^3):
+                - Dissolved inorganics (S_IN, S_PO4, S_IC, S_K, S_Mg): 1e2
+                - Dissolved gases/trace (S_O2, S_NO3, S_N2): 1e3
+                - Soluble organics (S_A, S_F, S_I): 1e2
+                - Particulates (X_*): 1e0 (order unity typical 1–15)
+                """
+                if not blk or not hasattr(blk, "conc_mass_comp"):
+                    return
+                try:
+                    comp_list = list(blk.params.component_list) if hasattr(blk, "params") and hasattr(blk.params, "component_list") else []
+                except Exception:
+                    comp_list = []
+                # Fallback: try to discover components from indexed Var
+                if not comp_list:
+                    try:
+                        comp_list = [j for (_t, j) in blk.conc_mass_comp.keys() if _t == 0]
+                    except Exception:
+                        comp_list = []
+                for j in comp_list:
+                    name = str(j)
+                    sf = None
+                    if name in ("S_IN", "S_PO4", "S_IC", "S_K", "S_Mg"):
+                        sf = 1e2
+                    elif name in ("S_O2", "S_NO3", "S_N2"):
+                        sf = 1e3
+                    elif name in ("S_A", "S_F", "S_I"):
+                        sf = 1e2
+                    elif name.startswith("X_"):
+                        sf = 1e0
+                    else:
+                        # Default for other solubles
+                        sf = 1e2
+                    try:
+                        if (0, j) in blk.conc_mass_comp:
+                            iscale.set_scaling_factor(blk.conc_mass_comp[0, j], sf)
+                    except Exception:
+                        pass
             
-            # Apply to all relevant state blocks
+            # Apply manual scaling to all relevant state blocks BEFORE auto-scaling
             t = 0  # Steady-state time index
             
             # Feed
@@ -2551,24 +2811,168 @@ def simulate_ad_system(
                         except:
                             pass
             
-            # Translators (only ADM1 side)
+            # Translators and downstream ASM2D states
             for translator in ["translator_AD_ASM", "translator_ASM_AD_mbr", "translator_centrate_AD"]:
                 if hasattr(m.fs, translator):
                     trans_obj = getattr(m.fs, translator)
-                    # Only apply to properties_in for ADM1->ASM2D translators
-                    # and properties_out for ASM2D->ADM1 translators
-                    if "AD_ASM" in translator and hasattr(trans_obj, "properties_in"):
+                    # For ADM1->ASM2D translators, scale ADM1 properties_in and ASM2D properties_out
+                    if "AD_ASM" in translator:
+                        if hasattr(trans_obj, "properties_in"):
+                            try:
+                                apply_adm1_scaling(trans_obj.properties_in[t])
+                            except:
+                                pass
+                        if hasattr(trans_obj, "properties_out"):
+                            try:
+                                apply_asm2d_scaling(trans_obj.properties_out[t])
+                            except:
+                                pass
+                    # For ASM2D->ADM1 translators, scale ASM2D properties_in and ADM1 properties_out
+                    elif ("ASM_AD" in translator or translator.endswith("_AD")):
+                        if hasattr(trans_obj, "properties_in"):
+                            try:
+                                apply_asm2d_scaling(trans_obj.properties_in[t])
+                            except:
+                                pass
+                        if hasattr(trans_obj, "properties_out"):
+                            try:
+                                apply_adm1_scaling(trans_obj.properties_out[t])
+                            except:
+                                pass
+
+            # MBR and Dewatering (ASM2D states)
+            try:
+                if hasattr(m.fs, "MBR"):
+                    if hasattr(m.fs.MBR, "properties_in"):
+                        apply_asm2d_scaling(m.fs.MBR.properties_in[t])
+                    if hasattr(m.fs.MBR, "properties_out"):
+                        # properties_out is indexed by outlet; loop if so
                         try:
-                            apply_adm1_scaling(trans_obj.properties_in[t])
-                        except:
-                            pass
-                    elif ("ASM_AD" in translator or translator.endswith("_AD")) and hasattr(trans_obj, "properties_out"):
-                        try:
-                            apply_adm1_scaling(trans_obj.properties_out[t])
-                        except:
-                            pass
+                            for k in m.fs.MBR.properties_out.keys():
+                                apply_asm2d_scaling(m.fs.MBR.properties_out[k])
+                        except Exception:
+                            apply_asm2d_scaling(m.fs.MBR.properties_out[t])
+                if hasattr(m.fs, "dewatering"):
+                    if hasattr(m.fs.dewatering, "properties_in"):
+                        apply_asm2d_scaling(m.fs.dewatering.properties_in[t])
+                    for attr in ("overflow_state", "underflow_state", "properties_treated", "properties_byproduct"):
+                        if hasattr(m.fs.dewatering, attr):
+                            blk = getattr(m.fs.dewatering, attr)
+                            try:
+                                apply_asm2d_scaling(blk[t])
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # Now let IDAES/WaterTAP scalers propagate and fill remaining factors
+            iscale.calculate_scaling_factors(m)
             
             logger.info("Applied comprehensive ADM1 scaling to all state blocks")
+            
+            # CRITICAL: Add ASM2D scaling function - Modified ASM2D doesn't scale conc_mass_comp by default
+            def apply_asm2d_scaling(blk):
+                """Apply scaling to ASM2D state blocks (critical for convergence)"""
+                if not blk:
+                    return
+                
+                if hasattr(blk, "conc_mass_comp"):
+                    # Soluble nutrients and ions (1e2 scaling for mg/L range)
+                    for comp in ["S_IN", "S_PO4", "S_IC", "S_K", "S_Mg"]:
+                        if (0, comp) in blk.conc_mass_comp:
+                            iscale.set_scaling_factor(blk.conc_mass_comp[0, comp], 1e2)
+                    
+                    # Dissolved gases (1e3 scaling for low concentrations)
+                    for comp in ["S_O2", "S_NO3", "S_N2"]:
+                        if (0, comp) in blk.conc_mass_comp:
+                            iscale.set_scaling_factor(blk.conc_mass_comp[0, comp], 1e3)
+                    
+                    # Organic solubles (1e2 scaling)
+                    for comp in ["S_F", "S_A", "S_NH4", "S_NO2", "S_ALK"]:
+                        if (0, comp) in blk.conc_mass_comp:
+                            iscale.set_scaling_factor(blk.conc_mass_comp[0, comp], 1e2)
+                    
+                    # Particulates (1e0 to 1e1 scaling for g/L range)
+                    for comp_idx in blk.conc_mass_comp.keys():
+                        comp_name = str(comp_idx[1])
+                        if comp_name.startswith("X_"):
+                            # Enhanced scaling for TSS (critical for MLSS control)
+                            if comp_name == "X_TSS":
+                                # TSS typically 10-15 kg/m³ = 10-15 g/L
+                                iscale.set_scaling_factor(blk.conc_mass_comp[comp_idx], 1e-1)
+                            # Higher scaling for lower concentration particulates
+                            elif comp_name in ["X_AUT", "X_PP", "X_PHA"]:
+                                iscale.set_scaling_factor(blk.conc_mass_comp[comp_idx], 1e1)
+                            else:
+                                iscale.set_scaling_factor(blk.conc_mass_comp[comp_idx], 1e0)
+                
+                # Scale flow if present
+                if hasattr(blk, "flow_vol"):
+                    try:
+                        flow_val = pyo.value(blk.flow_vol[0])
+                        if flow_val and flow_val > 0:
+                            iscale.set_scaling_factor(blk.flow_vol[0], 1.0/flow_val)
+                    except:
+                        pass
+            
+            # Apply ASM2D scaling to all relevant units (translators, MBR, dewatering)
+            logger.info("Applying ASM2D scaling to translators and downstream units...")
+            
+            # Translators (both input and output sides as appropriate)
+            translator_scaling_map = {
+                "translator_AD_ASM": "properties_out",      # ADM1 -> ASM2D
+                "translator_ASM_AD": "properties_in",       # ASM2D -> ADM1
+                "translator_ASM_AD_mbr": "properties_in",   # ASM2D -> ADM1
+                "translator_dewatering_ASM": "properties_out",  # ADM1 -> ASM2D
+                "translator_centrate_AD": "properties_in"   # ASM2D -> ADM1
+            }
+            
+            for trans_name, prop_side in translator_scaling_map.items():
+                if hasattr(m.fs, trans_name):
+                    trans_obj = getattr(m.fs, trans_name)
+                    if hasattr(trans_obj, prop_side):
+                        try:
+                            apply_asm2d_scaling(getattr(trans_obj, prop_side)[t])
+                        except Exception as e:
+                            logger.debug(f"ASM2D scaling for {trans_name}.{prop_side} skipped: {e}")
+            
+            # MBR unit (all ASM2D states)
+            if hasattr(m.fs, "MBR"):
+                for state in ["mixed_state", "permeate_state", "retentate_state"]:
+                    if hasattr(m.fs.MBR, state):
+                        try:
+                            apply_asm2d_scaling(getattr(m.fs.MBR, state)[t])
+                        except Exception as e:
+                            logger.debug(f"ASM2D scaling for MBR.{state} skipped: {e}")
+                # Also scale inlet/outlet ports
+                for port in ["inlet", "permeate", "retentate"]:
+                    if hasattr(m.fs.MBR, port):
+                        try:
+                            port_obj = getattr(m.fs.MBR, port)
+                            if hasattr(port_obj, "__getitem__"):
+                                apply_asm2d_scaling(port_obj[t])
+                        except Exception as e:
+                            logger.debug(f"ASM2D scaling for MBR.{port} skipped: {e}")
+            
+            # Dewatering unit (all ASM2D states)
+            if hasattr(m.fs, "dewatering"):
+                for state in ["mixed_state", "underflow_state", "overflow_state"]:
+                    if hasattr(m.fs.dewatering, state):
+                        try:
+                            apply_asm2d_scaling(getattr(m.fs.dewatering, state)[t])
+                        except Exception as e:
+                            logger.debug(f"ASM2D scaling for dewatering.{state} skipped: {e}")
+                # Also scale inlet/outlet ports
+                for port in ["inlet", "underflow", "overflow"]:
+                    if hasattr(m.fs.dewatering, port):
+                        try:
+                            port_obj = getattr(m.fs.dewatering, port)
+                            if hasattr(port_obj, "__getitem__"):
+                                apply_asm2d_scaling(port_obj[t])
+                        except Exception as e:
+                            logger.debug(f"ASM2D scaling for dewatering.{port} skipped: {e}")
+            
+            logger.info("Applied comprehensive ASM2D scaling to all state blocks")
             
             # Volumetric constraints have been removed to avoid over-constraining
             # No scaling needed for removed constraints
@@ -2585,6 +2989,9 @@ def simulate_ad_system(
         use_sd = getattr(m.fs.config, 'use_sd', True) if hasattr(m.fs, 'config') else True
         logger.info(f"Sequential Decomposition: {'Enabled' if use_sd else 'Disabled'}")
         initialize_flowsheet(m, use_sequential_decomposition=use_sd)
+        
+        # P1: Audit translator nitrogen mapping after initialization
+        audit_translator_nitrogen(m, logger)
         
         if initialize_only:
             return {

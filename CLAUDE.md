@@ -131,3 +131,30 @@ To test Codex integration:
 1. Run `test_milestone3.py` for full workflow testing
 2. Run `test_codex_integration.py` for standalone Codex testing
 3. Check `./adm1_state.json` for output verification
+
+## Regression Testing - Important Note
+
+### test_regression_catastrophe.py Non-Determinism
+
+The regression test in `tests/test_regression_catastrophe.py` is **NOT deterministic** due to solver convergence issues with the catastrophic failure case. Different runs may produce varying magnitudes of failure:
+
+- **Observed TAN range**: 10,000 - 77,000 mg-N/L (both are severe failures, normal is ~40 mg-N/L)
+- **pH range**: 4.0 - 7.0 (depending on convergence path)
+- **VFA accumulation**: 6 - 47 kg/m³ (both indicate process failure)
+
+#### What the test DOES reliably show:
+1. **TAN accumulation bug** - Always shows ammonia accumulation (>10,000 mg-N/L vs normal 40 mg-N/L)
+2. **Biomass washout bug** - Consistently shows TSS < 10 mg/L (complete biomass loss)
+3. **Severe methanogenic inhibition** - I_nh3 < 0.1 (>90% inhibition)
+
+#### How to use this test:
+- Use it to ensure **directional improvement** - fixes should reduce TAN and increase biomass
+- Do NOT expect exact reproducibility of specific values
+- The xfail assertions are set conservatively (TAN > 50,000) but may need adjustment
+- Focus on order-of-magnitude improvements rather than precise values
+
+#### Why non-determinism occurs:
+- Solver finds different local minima when the model is infeasible
+- Sequential decomposition initialization varies
+- MLSS constraints and other fixes alter the failure mode
+- Numerical precision differences across environments

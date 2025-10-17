@@ -25,7 +25,7 @@
       "type": "stdio",
       "command": "codex",
       "args": [
-        "mcp"
+        "mcp-server"
       ],
       "env": {
         "CODEX_HOME": "/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp/.codex"

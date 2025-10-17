@@ -1,6 +1,6 @@
 # Anaerobic Digester Design MCP Server
 
-An MCP server for anaerobic digester design using the WaterTAP framework, following the proven architecture of the RO-design-mcp server.
+An MCP server for anaerobic digester design using QSDsan with the ADM1+sulfur model (30 components), following the proven architecture of the RO-design-mcp server.
 
 ## Installation
 
@@ -11,8 +11,10 @@ cd /mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp
 # Install dependencies
 pip install -e .
 
-# For full WaterTAP simulation capabilities
-pip install -e ".[watertap]"
+# Core dependencies include:
+# - QSDsan for native ADM1+sulfur simulation (<100ms validation)
+# - FastMCP for MCP server framework
+# - Codex MCP for intelligent feedstock characterization
 ```
 
 ## Running the Server
@@ -46,18 +48,19 @@ await get_design_state()
 - [ ] Flowsheet selection logic (high TSS vs MBR)
 - [ ] Volume calculations
 
-### 📋 Milestone 3: Codex Integration
-- [ ] Codex MCP adapter
-- [ ] Feed characterization tool
-- [ ] ADM1 state estimation
+### ✅ Milestone 3: Codex Integration (Complete)
+- [x] Codex MCP adapter (.codex/AGENTS.md)
+- [x] Feed characterization tool
+- [x] ADM1+sulfur state estimation (30 components)
 
-### 🔬 Milestone 4: WaterTAP Simulation
-- [ ] ADM1 simulation wrapper
-- [ ] SRT iteration logic
-- [ ] Performance metrics extraction
+### ✅ Milestone 4: QSDsan Simulation (Complete)
+- [x] ADM1+sulfur simulation with QSDsan
+- [x] Sulfur dynamics (SO4 → H2S)
+- [x] Performance metrics extraction
+- [x] Stream analysis and sulfur balance
 
-### 💰 Milestone 5: Economic Analysis
-- [ ] WaterTAPCostingDetailed integration
+### 💰 Milestone 5: Economic Analysis (In Progress)
+- [ ] QSDsan costing integration
 - [ ] CAPEX/OPEX calculations
 - [ ] LCOW analysis
 
@@ -84,13 +87,30 @@ Clears all state to start a new design.
 
 ```
 anaerobic-design-mcp/
-├── server.py              # Main MCP server
-├── utils/                 # Utility modules (to be added)
-│   ├── heuristic_sizing.py
-│   ├── codex_adapter.py
-│   ├── ad_simulation.py
-│   └── economic_analysis.py
-└── tests/                 # Test suite (to be added)
+├── server.py                           # Main MCP server (lazy imports)
+├── tools/                              # MCP tool implementations
+│   ├── basis_of_design.py             # Parameter elicitation
+│   ├── validation.py                  # ADM1 state validation (QSDsan)
+│   ├── sizing.py                      # Heuristic sizing
+│   └── simulation.py                  # QSDsan simulation wrapper
+├── utils/                              # Utility modules
+│   ├── qsdsan_validation.py           # Fast QSDsan validation (<100ms)
+│   ├── qsdsan_simulation_sulfur.py    # ADM1+sulfur simulation
+│   ├── extract_qsdsan_sulfur_components.py  # Component definitions
+│   ├── qsdsan_sulfur_kinetics.py      # H2S inhibition kinetics
+│   ├── h2s_speciation.py              # Gas-liquid equilibrium
+│   ├── stream_analysis_sulfur.py      # Sulfur mass balance
+│   ├── heuristic_sizing.py            # Sizing calculations
+│   └── feedstock_characterization.py  # Feedstock handling
+├── core/                               # State management
+│   ├── state.py                       # Design state singleton
+│   └── utils.py                       # Helper functions
+├── .codex/                             # Codex MCP configuration
+│   ├── AGENTS.md                      # ADM1+sulfur expert prompt
+│   └── config.toml                    # Codex settings
+└── tests/                              # Regression test suite
+    ├── test_qsdsan_simulation_basic.py
+    └── test_regression_catastrophe.py
 ```
 
 ## Testing
