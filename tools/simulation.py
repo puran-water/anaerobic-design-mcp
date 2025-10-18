@@ -1,32 +1,21 @@
 """
-QSDsan simulation tool for anaerobic digesters with ADM1+sulfur model.
+QSDsan simulation tool for anaerobic digesters with ADM1+sulfur model - CLI Instruction Mode.
 
-Clean implementation replacing WaterTAP with QSDsan native simulation.
-No backward compatibility - fresh start with proper QSDsan patterns.
+Returns CLI execution instructions to avoid FastMCP STDIO connection timeout
+during the 18-second QSDsan component loading.
 """
 
-import anyio
 import logging
+import json
+import sys
+from pathlib import Path
 from typing import Dict, Any, Optional
-from datetime import datetime
 
 from core.state import design_state
 from core.utils import coerce_to_dict
 
-# Import simulation and analysis modules
-from utils.qsdsan_simulation_sulfur import (
-    run_simulation_sulfur,
-    run_dual_hrt_simulation
-)
-from utils.stream_analysis_sulfur import (
-    analyze_liquid_stream,
-    analyze_gas_stream,
-    analyze_inhibition,
-    calculate_sulfur_metrics,
-    analyze_biomass_yields
-)
-
 logger = logging.getLogger(__name__)
+logger.info("Using QSDsan simulation via CLI instructions (FastMCP-compatible)")
 
 
 async def simulate_ad_system_tool(
@@ -39,8 +28,7 @@ async def simulate_ad_system_tool(
     """
     Simulate anaerobic digester using QSDsan with ADM1+sulfur model.
 
-    Clean implementation - no backward compatibility with WaterTAP.
-    Uses proper dynamic simulation with early-stop convergence checking.
+    Returns CLI instructions for manual execution (bypasses FastMCP STDIO timeout issues).
 
     Parameters
     ----------
@@ -58,36 +46,21 @@ async def simulate_ad_system_tool(
     Returns
     -------
     dict
-        Clean structure with:
-        - success: bool
-        - streams: {influent, effluent, biogas} with full properties
-        - performance: {yields, inhibition}
-        - sulfur: Comprehensive sulfur analysis
-        - validation: Robustness check results (if validate_hrt=True)
-        - convergence: Simulation convergence info
+        CLI execution instructions with:
+        - status: "manual_execution_required"
+        - command: CLI command to run
+        - instructions: List of steps for the user
 
     Notes
     -----
-    **Key Changes from WaterTAP version**:
-    1. Native QSDsan simulation (no subprocess)
-    2. Proper dynamic tracking with set_dynamic_tracker
-    3. Early-stop convergence checking
-    4. Dual-HRT validation for robustness
-    5. H2S speciation and inhibition
-    6. Clean metric structure (no WaterTAP compatibility)
-
-    **CRITICAL** (per Codex review):
-    - Must use set_dynamic_tracker before simulate()
-    - Must initialize sulfur components with non-zero values
-    - Must report H2S/HS⁻ speciation
-    - Must validate design isn't on a performance cliff
+    **CLI Instruction Mode**:
+    - QSDsan component loading takes ~18 seconds
+    - This causes FastMCP STDIO connection to timeout
+    - CLI mode allows execution outside MCP server
+    - Results are saved to simulation_results.json
     """
     try:
-        start_time = datetime.now()
-
         # 1. Validate inputs and prepare simulation parameters
-        logger.info("=== Starting ADM1+Sulfur Simulation ===")
-
         if use_current_state:
             # Use design state
             if not design_state.basis_of_design:
@@ -112,18 +85,14 @@ async def simulate_ad_system_tool(
             heuristic_config_raw = design_state.heuristic_config
 
             # Normalize basis keys: feed_flow_m3d → Q, temperature_c → Temp (K)
-            # Handle None values defensively
             temp_c = basis_raw.get('temperature_c')
             temp_k = basis_raw.get('Temp')
 
             if temp_c is not None:
-                # Convert from Celsius to Kelvin
                 temp_final = temp_c + 273.15
             elif temp_k is not None:
-                # Already in Kelvin
                 temp_final = temp_k
             else:
-                # Default to 35°C = 308.15 K
                 temp_final = 308.15
 
             basis = {
@@ -140,9 +109,6 @@ async def simulate_ad_system_tool(
                     digester['HRT_days'] = digester.pop('hrt_days')
                 heuristic_config['digester'] = digester
 
-            logger.info(f"Using design state: Q={basis.get('Q', 'N/A')} m3/d, "
-                       f"T={basis.get('Temp', 'N/A')} K")
-
         else:
             # Use custom inputs
             custom_inputs = coerce_to_dict(custom_inputs) or {}
@@ -156,163 +122,71 @@ async def simulate_ad_system_tool(
                     "message": "Custom inputs must include basis_of_design, adm1_state, and heuristic_config"
                 }
 
-            logger.info(f"Using custom inputs: Q={basis.get('Q', 'N/A')} m3/d")
+        # 2. Save input files for CLI execution
+        basis_file = Path('./simulation_basis.json')
+        adm1_file = Path('./simulation_adm1_state.json')
+        config_file = Path('./simulation_heuristic_config.json')
 
-        # 2. Run simulation(s)
-        logger.info(f"Validate HRT: {validate_hrt}, Variation: ±{hrt_variation*100:.0f}%")
+        with open(basis_file, 'w') as f:
+            json.dump(basis, f, indent=2)
+        with open(adm1_file, 'w') as f:
+            json.dump(adm1_state, f, indent=2)
+        with open(config_file, 'w') as f:
+            json.dump(heuristic_config, f, indent=2)
 
-        if validate_hrt:
-            # Dual-HRT simulation for robustness check
-            logger.info("Running dual-HRT validation...")
+        # 3. Build CLI command (convert Windows paths to WSL format for bash compatibility)
+        python_exe = sys.executable
+        if python_exe.startswith('C:\\'):
+            python_exe = python_exe.replace('C:\\', '/mnt/c/').replace('\\', '/')
 
-            results_design, results_check, warnings = await anyio.to_thread.run_sync(
-                run_dual_hrt_simulation,
-                basis, adm1_state, heuristic_config, hrt_variation
-            )
+        command_parts = [
+            python_exe,
+            "utils/simulate_cli.py",
+            f"--basis {basis_file}",
+            f"--adm1-state {adm1_file}",
+            f"--heuristic-config {config_file}",
+            f"--hrt-variation {hrt_variation}"
+        ]
 
-            # Unpack design results
-            sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d = results_design
+        if not validate_hrt:
+            command_parts.append("--no-validate-hrt")
 
-            # Unpack check results (we'll report these separately)
-            sys_c, inf_c, eff_c, gas_c, converged_at_c, status_c = results_check
+        command = " ".join(command_parts)
 
-            logger.info(f"Design HRT: {status_d} at t={converged_at_d} days")
-            logger.info(f"Check HRT: {status_c} at t={converged_at_c} days")
-
-            if warnings:
-                logger.warning(f"Robustness warnings: {len(warnings)}")
-                for warning in warnings:
-                    logger.warning(f"  - {warning}")
-
-        else:
-            # Single simulation at design HRT
-            logger.info("Running single simulation at design HRT...")
-
-            HRT_design = heuristic_config['digester']['HRT_days']
-            sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d = await anyio.to_thread.run_sync(
-                run_simulation_sulfur,
-                basis, adm1_state, HRT_design
-            )
-
-            logger.info(f"Simulation: {status_d} at t={converged_at_d} days")
-
-            # No validation results
-            warnings = []
-
-        # 3. Analyze results from design simulation
-        logger.info("Analyzing simulation results...")
-
-        influent = analyze_liquid_stream(inf_d, include_components=True)
-        effluent = analyze_liquid_stream(eff_d, include_components=True)
-        biogas = analyze_gas_stream(gas_d)
-        yields = analyze_biomass_yields(inf_d, eff_d)
-
-        # Calculate sulfur metrics first (includes speciation)
-        sulfur = calculate_sulfur_metrics(inf_d, eff_d, gas_d)
-
-        # Pass speciation to inhibition analysis to avoid recalculation
-        inhibition = analyze_inhibition((sys_d, inf_d, eff_d, gas_d), speciation=sulfur.get("speciation"))
-
-        logger.info(f"COD removal: {yields.get('COD_removal_efficiency', 0):.1f}%")
-        logger.info(f"Biogas: {biogas.get('flow_total', 0):.1f} m3/d, "
-                   f"CH4: {biogas.get('methane_percent', 0):.1f}%")
-        logger.info(f"H2S: {biogas.get('h2s_ppm', 0):.1f} ppm")
-
-        # 4. Cache results for both workflow tracking and optional analysis tools
-        # simulation_results: lightweight summary for workflow progress tracking
-        design_state.simulation_results = {
-            "success": True,
-            "status": status_d,
-            "converged_at_days": converged_at_d,
-            "cod_removal_pct": yields.get('COD_removal_efficiency', 0),
-            "biogas_m3_d": biogas.get('flow_total', 0),
-            "methane_pct": biogas.get('methane_percent', 0),
-            "h2s_ppm": biogas.get('h2s_ppm', 0)
-        }
-
-        # last_simulation: full stream objects for optional analysis tools
-        design_state.last_simulation = {
-            "sys": sys_d,
-            "inf": inf_d,
-            "eff": eff_d,
-            "gas": gas_d,
-            "timestamp": datetime.now(),
-            "converged_at": converged_at_d,
-            "status": status_d
-        }
-
-        logger.info("Simulation results cached for workflow tracking and optional analysis tools")
-
-        # 5. Build validation section if dual-HRT was run
-        validation_results = None
-        if validate_hrt:
-            # Analyze check simulation
-            effluent_check = analyze_liquid_stream(eff_c)
-            biogas_check = analyze_gas_stream(gas_c)
-            yields_check = analyze_biomass_yields(inf_c, eff_c)
-
-            validation_results = {
-                "hrt_design": heuristic_config['digester']['HRT_days'],
-                "hrt_check": heuristic_config['digester']['HRT_days'] * (1 + hrt_variation),
-                "converged_at_design": converged_at_d,
-                "converged_at_check": converged_at_c,
-                "status_design": status_d,
-                "status_check": status_c,
-                "performance_comparison": {
-                    "cod_removal_design": yields.get('COD_removal_efficiency', 0),
-                    "cod_removal_check": yields_check.get('COD_removal_efficiency', 0),
-                    "biogas_design": biogas.get('flow_total', 0),
-                    "biogas_check": biogas_check.get('flow_total', 0),
-                    "methane_pct_design": biogas.get('methane_percent', 0),
-                    "methane_pct_check": biogas_check.get('methane_percent', 0),
-                    "h2s_ppm_design": biogas.get('h2s_ppm', 0),
-                    "h2s_ppm_check": biogas_check.get('h2s_ppm', 0)
-                },
-                "warnings": warnings
-            }
-
-        # 6. Calculate runtime
-        end_time = datetime.now()
-        runtime_seconds = (end_time - start_time).total_seconds()
-
-        logger.info(f"Simulation completed in {runtime_seconds:.1f} seconds")
-        logger.info("=== Simulation Complete ===")
-
-        # 7. Return clean structure
         return {
-            "success": True,
-            "message": f"Simulation completed: {status_d} at t={converged_at_d} days",
-
-            # Stream properties (all 30 components + composites)
-            "streams": {
-                "influent": influent,
-                "effluent": effluent,
-                "biogas": biogas
+            "status": "manual_execution_required",
+            "command": command,
+            "instructions": [
+                "FastMCP cannot execute QSDsan simulation reliably (STDIO timeout during 18s component loading).",
+                "Run the command below in your terminal:",
+                "",
+                f"  {command}",
+                "",
+                "The simulation will:",
+                "  1. Load QSDsan components (~18 seconds)",
+                "  2. Run ADM1+sulfur simulation (~50-150 seconds)",
+                "  3. Save results to simulation_results.json",
+                "",
+                "After completion, you can:",
+                "  - View results: cat simulation_results.json | jq",
+                "  - Load into workflow: Use the results file for next steps",
+                "",
+                f"Input files saved:",
+                f"  - {basis_file}",
+                f"  - {adm1_file}",
+                f"  - {config_file}"
+            ],
+            "input_files": {
+                "basis": str(basis_file),
+                "adm1_state": str(adm1_file),
+                "heuristic_config": str(config_file)
             },
-
-            # Performance metrics
-            "performance": {
-                "yields": yields,
-                "inhibition": inhibition
-            },
-
-            # Sulfur analysis (NEW - sulfur-specific)
-            "sulfur": sulfur,
-
-            # Validation results (if dual-HRT was run)
-            "validation": validation_results,
-
-            # Convergence info
-            "convergence": {
-                "converged_at_days": converged_at_d,
-                "status": status_d,
-                "runtime_seconds": runtime_seconds
-            }
+            "output_file": "simulation_results.json"
         }
 
     except Exception as e:
-        logger.error(f"Error in simulate_ad_system_tool: {str(e)}", exc_info=True)
+        logger.error(f"Error preparing simulation CLI command: {str(e)}", exc_info=True)
         return {
             "success": False,
-            "message": f"Simulation failed: {str(e)}"
+            "message": f"Failed to prepare simulation command: {str(e)}"
         }
