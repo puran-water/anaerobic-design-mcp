@@ -11,16 +11,6 @@
         "ANAEROBIC_DESIGN_MCP_ROOT": "C:\\Users\\hvksh\\mcp-servers\\anaerobic-design-mcp"
       }
     },
-    "validation": {
-      "type": "stdio",
-      "command": "/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe",
-      "args": [
-        "C:\\Users\\hvksh\\mcp-servers\\anaerobic-design-mcp\\server_validation.py"
-      ],
-      "env": {
-        "MCP_TIMEOUT": "600000"
-      }
-    },
     "ADM1-State-Variable-Estimator": {
       "type": "stdio",
       "command": "codex",
