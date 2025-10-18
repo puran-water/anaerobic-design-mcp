@@ -53,11 +53,17 @@ async def validate_adm1_state(
         with open(adm1_file, 'w') as f:
             json.dump(clean_state, f, indent=2)
 
-        # Build CLI command (use relative paths for portability)
+        # Build CLI command (convert Windows paths to WSL format for bash compatibility)
         user_params_json = json.dumps(user_parameters).replace('"', '\\"')
 
+        # Convert sys.executable to WSL path if it's a Windows path
+        python_exe = sys.executable
+        if python_exe.startswith('C:\\'):
+            # Convert C:\Users\... to /mnt/c/Users/...
+            python_exe = python_exe.replace('C:\\', '/mnt/c/').replace('\\', '/')
+
         command = (
-            f"{sys.executable} utils/validate_cli.py validate "
+            f"{python_exe} utils/validate_cli.py validate "
             f"--adm1-state adm1_state_cleaned.json "
             f"--user-params '{user_params_json}' "
             f"--tolerance {tolerance} "
@@ -138,9 +144,13 @@ async def compute_bulk_composites(
         with open(adm1_file, 'w') as f:
             json.dump(clean_state, f, indent=2)
 
-        # Build CLI command (use relative paths for portability)
+        # Build CLI command (convert Windows paths to WSL format for bash compatibility)
+        python_exe = sys.executable
+        if python_exe.startswith('C:\\'):
+            python_exe = python_exe.replace('C:\\', '/mnt/c/').replace('\\', '/')
+
         command = (
-            f"{sys.executable} utils/validate_cli.py composites "
+            f"{python_exe} utils/validate_cli.py composites "
             f"--adm1-state adm1_state_cleaned.json "
             f"--temperature-c {temperature_c}"
         )
@@ -203,9 +213,13 @@ async def check_strong_ion_balance(
         with open(adm1_file, 'w') as f:
             json.dump(clean_state, f, indent=2)
 
-        # Build CLI command (use relative paths for portability)
+        # Build CLI command (convert Windows paths to WSL format for bash compatibility)
+        python_exe = sys.executable
+        if python_exe.startswith('C:\\'):
+            python_exe = python_exe.replace('C:\\', '/mnt/c/').replace('\\', '/')
+
         command = (
-            f"{sys.executable} utils/validate_cli.py ion-balance "
+            f"{python_exe} utils/validate_cli.py ion-balance "
             f"--adm1-state adm1_state_cleaned.json "
             f"--ph {ph} "
             f"--temperature-c 35.0"
