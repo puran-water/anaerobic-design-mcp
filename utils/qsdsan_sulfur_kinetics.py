@@ -17,11 +17,6 @@ import numpy as np
 from qsdsan import Process, Processes
 from qsdsan.processes._adm1 import substr_inhibit, non_compet_inhibit, ADM1
 
-from utils.extract_qsdsan_sulfur_components import (
-    ADM1_SULFUR_CMPS,
-    SULFUR_COMPONENT_INFO
-)
-
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -76,6 +71,12 @@ def create_sulfate_reduction_processes():
     Returns:
         Processes object with 3 SRB processes
     """
+    # Import component info here to avoid module-level dependency
+    from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS, SULFUR_COMPONENT_INFO
+
+    if ADM1_SULFUR_CMPS is None or SULFUR_COMPONENT_INFO is None:
+        raise RuntimeError("Components not initialized. Call get_qsdsan_components() first.")
+
     params = SRB_PARAMETERS
     i_mass_IS = SULFUR_COMPONENT_INFO['S_IS']['i_mass']
 
@@ -304,6 +305,12 @@ def create_rate_function_with_h2s_inhibition(srb_rate_functions, base_cmps, base
     Returns:
         Custom rate function for use with set_rate_function()
     """
+    # Import component info here to avoid module-level dependency
+    from utils.extract_qsdsan_sulfur_components import SULFUR_COMPONENT_INFO
+
+    if SULFUR_COMPONENT_INFO is None:
+        raise RuntimeError("SULFUR_COMPONENT_INFO not initialized. Call get_qsdsan_components() first.")
+
     # Get component index for S_IS
     idx_IS = SULFUR_COMPONENT_INFO['S_IS']['index']
 
@@ -407,6 +414,12 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     from qsdsan import Components
     from qsdsan.processes import mass2mol_conversion
     import numpy as np
+
+    # Import components here to avoid circular dependency and ensure they're loaded
+    from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS
+
+    if ADM1_SULFUR_CMPS is None:
+        raise RuntimeError("ADM1_SULFUR_CMPS not initialized. Call get_qsdsan_components() first.")
 
     # Get first 27 components from our extended 30-component set
     # Use tuple for slicing, then extract i_mass and chem_MW arrays

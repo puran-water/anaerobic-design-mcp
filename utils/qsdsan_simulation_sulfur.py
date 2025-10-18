@@ -21,7 +21,7 @@ import logging
 
 # Import our custom ADM1+sulfur extension
 from utils.qsdsan_sulfur_kinetics import extend_adm1_with_sulfate_and_inhibition
-from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS
+# Note: ADM1_SULFUR_CMPS imported locally where needed to avoid capturing None at module load time
 
 # Import pH calculation if available
 try:
@@ -74,6 +74,12 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
     - pH and alkalinity calculated based on acid-base equilibria
     """
     try:
+        # Import components here to ensure they're loaded
+        from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS
+
+        if ADM1_SULFUR_CMPS is None:
+            raise RuntimeError("ADM1_SULFUR_CMPS not initialized. Call get_qsdsan_components() first.")
+
         inf = WasteStream('Influent', T=Temp)
 
         # Set component system (must be done before setting flows)
