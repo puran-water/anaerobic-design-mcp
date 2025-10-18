@@ -184,19 +184,24 @@ def check_charge_balance_sync(adm1_state: Dict[str, Any], ph: float, temperature
     )
 
     # Get charge composite (automatically includes all charged species)
-    net_charge_mmol_l = ws.charge * 1000  # mol/m³ → mmol/L
+    # Unit: mol/m³ (same as mmol/L for dilute solutions)
+    net_charge_mol_m3 = ws.composite('charge', unit='mol/m3')
+    net_charge_mmol_l = net_charge_mol_m3 * 1000  # mol/m³ → mmol/L
     residual_meq_l = abs(net_charge_mmol_l)  # meq/L
 
     # Calculate imbalance percentage
-    # Use total ionic strength as reference
-    total_cations = sum([
-        ws.imass[comp.ID] / comp.MW * comp.charge * 1000
-        for comp in ws.components
-        if comp.charge > 0
-    ])
+    # Use total cation concentration as reference
+    # Only sum components with defined positive charge (avoid formula-based charge calculation)
+    total_cations_mol_m3 = 0.0
+    for comp in ws.components:
+        # Check if component has a defined charge (not formula-derived)
+        if hasattr(comp, '_charge') and comp._charge is not None and comp._charge > 0:
+            total_cations_mol_m3 += ws.imass[comp.ID] / comp.MW * comp._charge
 
-    if total_cations > 0:
-        imbalance_percent = (residual_meq_l / total_cations) * 100
+    total_cations_mmol_l = total_cations_mol_m3 * 1000
+
+    if total_cations_mmol_l > 0:
+        imbalance_percent = (residual_meq_l / total_cations_mmol_l) * 100
     else:
         imbalance_percent = 0.0
 

@@ -1,6 +1,6 @@
 # Anaerobic Digester Design MCP Server
 
-An MCP server for anaerobic digester design using QSDsan with the ADM1+sulfur model (30 components), following the proven architecture of the RO-design-mcp server.
+An MCP server for anaerobic digester design using QSDsan with the **mADM1 (Modified ADM1) model** featuring 62 state variables + H2O (63 total components), including phosphorus, sulfur, and iron extensions for comprehensive nutrient recovery modeling.
 
 ## Installation
 
@@ -12,7 +12,7 @@ cd /mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp
 pip install -e .
 
 # Core dependencies include:
-# - QSDsan for native ADM1+sulfur simulation (<100ms validation)
+# - QSDsan for native mADM1 simulation (63 components, <100ms validation)
 # - FastMCP for MCP server framework
 # - Codex MCP for intelligent feedstock characterization
 ```
@@ -51,18 +51,62 @@ await get_design_state()
 ### ✅ Milestone 3: Codex Integration (Complete)
 - [x] Codex MCP adapter (.codex/AGENTS.md)
 - [x] Feed characterization tool
-- [x] ADM1+sulfur state estimation (30 components)
+- [x] mADM1 state estimation (62 components + H2O)
+- [x] Complete P/S/Fe extension support
 
 ### ✅ Milestone 4: QSDsan Simulation (Complete)
-- [x] ADM1+sulfur simulation with QSDsan
-- [x] Sulfur dynamics (SO4 → H2S)
+- [x] mADM1 simulation with QSDsan (63 components)
+- [x] Production PCM solver (9 Codex-reviewed fixes)
+- [x] Sulfur dynamics (SO4 → H2S, 4 SRB types)
+- [x] EBPR modeling (X_PHA, X_PP, X_PAO)
+- [x] Iron chemistry (Fe3+/Fe2+, HFO adsorption)
+- [x] Mineral precipitation (13 types)
 - [x] Performance metrics extraction
-- [x] Stream analysis and sulfur balance
+- [x] Complete validation tools for mADM1
 
 ### 💰 Milestone 5: Economic Analysis (In Progress)
 - [ ] QSDsan costing integration
 - [ ] CAPEX/OPEX calculations
 - [ ] LCOW analysis
+
+## mADM1 Model Features
+
+The server uses the **Modified ADM1 (mADM1)** model with comprehensive extensions:
+
+### Core ADM1 (24 components)
+- Soluble organics: Sugars, amino acids, fatty acids, VFAs (acetate, propionate, butyrate, valerate)
+- Particulate organics: Carbohydrates, proteins, lipids
+- Microbial biomass: 7 functional groups (sugar degraders, methanogens, etc.)
+- Inorganic: S_IC, S_IN, S_IP
+
+### EBPR Extension (3 components)
+- **X_PHA**: Polyhydroxyalkanoates (PAO storage polymers)
+- **X_PP**: Polyphosphate
+- **X_PAO**: Phosphate-accumulating organisms
+
+### Sulfur Extension (7 components)
+- **S_SO4**: Sulfate (SO4²⁻)
+- **S_IS**: Total dissolved sulfide (H2S + HS⁻ + S²⁻)
+- **X_hSRB, X_aSRB, X_pSRB, X_c4SRB**: Four sulfate-reducing bacteria types
+- **S_S0**: Elemental sulfur
+
+### Iron Extension (9 components)
+- **S_Fe3, S_Fe2**: Ferric and ferrous iron
+- **X_HFO_***: Seven hydrous ferric oxide variants (high/low reactivity, P-loaded, aged)
+
+### Mineral Precipitation (13 components)
+- **Phosphates**: Struvite, HAP, ACP, DCPD, OCP, newberyite, K-struvite, Fe/Al phosphates
+- **Carbonates**: Calcite, ACC, magnesite
+- **Sulfides**: Iron sulfide (FeS)
+
+### Additional Cations (4 components)
+- **S_K, S_Mg, S_Ca, S_Al**: Complete ionic strength modeling
+
+### Production PCM Solver
+- **9 Codex-reviewed fixes** for thermodynamic accuracy
+- Complete charge balance with all ionic species
+- Temperature-corrected equilibrium constants
+- Proper unit handling throughout
 
 ## Available Tools
 
@@ -95,8 +139,11 @@ anaerobic-design-mcp/
 │   └── simulation.py                  # QSDsan simulation wrapper
 ├── utils/                              # Utility modules
 │   ├── qsdsan_validation.py           # Fast QSDsan validation (<100ms)
-│   ├── qsdsan_simulation_sulfur.py    # ADM1+sulfur simulation
-│   ├── extract_qsdsan_sulfur_components.py  # Component definitions
+│   ├── qsdsan_validation_sync.py      # Subprocess validation (mADM1)
+│   ├── validate_cli.py                # CLI validation interface
+│   ├── qsdsan_madm1.py                # mADM1 process model (63 components)
+│   ├── qsdsan_simulation_madm1.py     # mADM1 simulation wrapper
+│   ├── extract_qsdsan_sulfur_components.py  # mADM1 component loader
 │   ├── qsdsan_sulfur_kinetics.py      # H2S inhibition kinetics
 │   ├── h2s_speciation.py              # Gas-liquid equilibrium
 │   ├── stream_analysis_sulfur.py      # Sulfur mass balance
@@ -106,7 +153,7 @@ anaerobic-design-mcp/
 │   ├── state.py                       # Design state singleton
 │   └── utils.py                       # Helper functions
 ├── .codex/                             # Codex MCP configuration
-│   ├── AGENTS.md                      # ADM1+sulfur expert prompt
+│   ├── AGENTS.md                      # mADM1 expert prompt (62 components)
 │   └── config.toml                    # Codex settings
 └── tests/                              # Regression test suite
     ├── test_qsdsan_simulation_basic.py

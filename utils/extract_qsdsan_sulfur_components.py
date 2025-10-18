@@ -27,116 +27,94 @@ SULFUR_COMPONENT_INFO = None
 
 def create_adm1_sulfur_cmps():
     """
-    Create 30-component set: ADM1 (27) + Sulfur (3).
+    Create mADM1 component set: 63 components (62 state variables + H2O).
 
-    ADM1 has 27 components (0-26): S_su...X_I, S_cat, S_an, H2O
-    Sulfur components appended at end:
-    - S_SO4: Sulfate (position 27)
-    - S_IS: Total dissolved sulfide - H2S + HS⁻ + S²⁻ (position 28)
-    - X_SRB: Lumped sulfate-reducing biomass (position 29)
+    This is the FULL mADM1 (Modified ADM1) with phosphorus, sulfur, and iron extensions.
+    Includes all 62 state variables from qsdsan_madm1.py plus H2O.
+
+    Component structure (63 total):
+    - Core ADM1 soluble (0-12): S_su, S_aa, S_fa, S_va, S_bu, S_pro, S_ac, S_h2, S_ch4, S_IC, S_IN, S_IP, S_I
+    - Core ADM1 particulates (13-23): X_ch, X_pr, X_li, X_su, X_aa, X_fa, X_c4, X_pro, X_ac, X_h2, X_I
+    - EBPR extension (24-26): X_PHA, X_PP, X_PAO
+    - Metal ions (27-28): S_K, S_Mg
+    - Sulfur species (29-35): S_SO4, S_IS, X_hSRB, X_aSRB, X_pSRB, X_c4SRB, S_S0
+    - Iron species (36-44): S_Fe3, S_Fe2, X_HFO_H, X_HFO_L, X_HFO_old, X_HFO_HP, X_HFO_LP, X_HFO_HP_old, X_HFO_LP_old
+    - More metals (45-46): S_Ca, S_Al
+    - Mineral precipitates (47-59): X_CCM, X_ACC, X_ACP, X_HAP, X_DCPD, X_OCP, X_struv, X_newb, X_magn, X_kstruv, X_FeS, X_Fe3PO42, X_AlPO4
+    - Final ions (60-61): S_Na, S_Cl
+    - Water (62): H2O
 
     Returns:
-        Components object with 30 components
+        Components object with 63 components
 
     Raises:
-        ImportError: If QSDsan ADM1 components cannot be loaded
+        ImportError: If QSDsan mADM1 components cannot be loaded
     """
-    logger.info("Creating extended ADM1+sulfur component set (30 components)")
+    logger.info("Creating full mADM1 component set (63 components)")
 
+    # Try to import mADM1 (only available in adm1 branch OR local implementation)
     try:
-        from qsdsan.processes._adm1 import create_adm1_cmps
-    except ImportError as e:
-        raise ImportError(
-            f"Could not import QSDsan ADM1 components: {e}. "
-            "Ensure QSDsan is installed and accessible."
-        )
-
-    # Try to import mADM1 (only available in adm1 branch)
-    try:
-        from qsdsan.processes._madm1 import create_madm1_cmps
+        from utils.qsdsan_madm1 import create_madm1_cmps
         madm1_available = True
+        logger.info("Using local mADM1 implementation from utils.qsdsan_madm1")
     except ImportError:
-        madm1_available = False
-        logger.warning("mADM1 module not available (requires QSDsan adm1 branch)")
+        try:
+            from qsdsan.processes._madm1 import create_madm1_cmps
+            madm1_available = True
+            logger.info("Using QSDsan upstream mADM1 implementation")
+        except ImportError:
+            madm1_available = False
+            logger.error("mADM1 module not available - cannot create full component set")
+            raise ImportError(
+                "mADM1 components not available. Ensure either:\n"
+                "1. Local implementation exists in utils/qsdsan_madm1.py, OR\n"
+                "2. QSDsan adm1 branch is installed"
+            )
 
-    # Get base ADM1 components (positions 0-26) WITHOUT setting thermo yet
-    # CRITICAL: Do not modify order - ADM1 kinetics depend on state vector positions
-    # ADM1 has 27 components ending with S_cat, S_an, H2O
-    base_cmps_compiled = create_adm1_cmps(set_thermo=False)
-    logger.info(f"Loaded {len(base_cmps_compiled)} standard ADM1 components")
+    # Get full mADM1 components (63 components) WITHOUT setting thermo yet
+    # CRITICAL: Do not modify order - mADM1 kinetics depend on state vector positions
+    madm1_cmps = create_madm1_cmps(set_thermo=False)
+    logger.info(f"Loaded {len(madm1_cmps)} mADM1 components")
 
-    # Verify ADM1 structure
-    if len(base_cmps_compiled) != 27:
-        raise RuntimeError(f"Expected 27 ADM1 components, got {len(base_cmps_compiled)}")
-    last_three = list(base_cmps_compiled.IDs[-3:])
-    if last_three != ['S_cat', 'S_an', 'H2O']:
-        raise RuntimeError(f"Unexpected ADM1 component ordering, last 3: {last_three}")
+    # Verify mADM1 structure
+    if len(madm1_cmps) != 63:
+        raise RuntimeError(f"Expected 63 mADM1 components, got {len(madm1_cmps)}")
 
-    # Get mADM1 components (for extraction) or create manually
-    if madm1_available:
-        # Extract sulfur species from mADM1 (preferred method)
-        madm1_cmps = create_madm1_cmps(set_thermo=False)
-        logger.info(f"Loaded {len(madm1_cmps)} mADM1 components for extraction")
+    # Verify key components are in correct positions
+    expected_positions = {
+        0: 'S_su',
+        10: 'S_IN',
+        11: 'S_IP',
+        27: 'S_K',
+        29: 'S_SO4',
+        30: 'S_IS',
+        36: 'S_Fe3',
+        45: 'S_Ca',
+        60: 'S_Na',
+        61: 'S_Cl',
+        62: 'H2O'
+    }
 
-        # Position 27: S_SO4 - Sulfate
-        S_SO4 = madm1_cmps['S_SO4'].copy('S_SO4')
-        S_SO4.description = 'Sulfate (SO4²⁻) - substrate for sulfate-reducing bacteria'
-        logger.debug(f"Extracted S_SO4: MW={S_SO4.chem_MW:.2f} g/mol, i_mass={S_SO4.i_mass:.4f}")
+    for idx, expected_id in expected_positions.items():
+        actual_id = madm1_cmps.IDs[idx]
+        if actual_id != expected_id:
+            raise RuntimeError(
+                f"mADM1 component ordering broken: position {idx} is '{actual_id}', "
+                f"expected '{expected_id}'"
+            )
 
-        # Position 28: S_IS - Total dissolved sulfide
-        S_IS = madm1_cmps['S_IS'].copy('S_IS')
-        S_IS.description = 'Total dissolved sulfide (H2S + HS⁻ + S²⁻)'
-        logger.debug(f"Extracted S_IS: MW={S_IS.chem_MW:.2f} g/mol, i_mass={S_IS.i_mass:.4f}")
+    logger.info("mADM1 component ordering verified")
 
-        # Position 29: X_SRB - Lumped sulfate-reducing biomass
-        # Based on X_hSRB from mADM1, but lumped for simplicity
-        X_SRB = madm1_cmps['X_hSRB'].copy('X_SRB')
-        X_SRB.ID = 'X_SRB'
-        X_SRB.description = 'Lumped sulfate-reducing biomass (H2 + acetate utilizers)'
-        logger.debug(f"Created X_SRB (lumped): i_COD={X_SRB.i_COD:.3f}, i_N={X_SRB.i_N:.4f}")
-    else:
-        # Create sulfur components manually if mADM1 unavailable
-        logger.info("Creating sulfur components manually from QSDsan primitives")
-        from qsdsan import Component
+    # Components are already compiled by create_madm1_cmps
+    # Just set the active thermo on QSDsan
+    qs.set_thermo(madm1_cmps)
 
-        S_SO4 = Component.from_chemical('S_SO4', chemical='SO4-2',
-                                       description='Sulfate (SO4²⁻) - substrate for SRB',
-                                       measured_as='S',
-                                       particle_size='Soluble',
-                                       degradability='Undegradable',
-                                       organic=False)
-        S_IS = Component.from_chemical('S_IS', chemical='H2S',
-                                      description='Total dissolved sulfide (H2S + HS⁻ + S²⁻)',
-                                      measured_as='S',
-                                      particle_size='Soluble',
-                                      degradability='Undegradable',
-                                      organic=False)
-        # Create SRB biomass similar to other ADM1 biomass
-        X_SRB = base_cmps_compiled['X_su'].copy('X_SRB')
-        X_SRB.description = 'Lumped sulfate-reducing biomass (H2 + acetate utilizers)'
+    logger.info("mADM1 component thermodynamics set successfully")
 
-        logger.info("Created sulfur components manually (mADM1 not available)")
+    # Set global components for validation and info functions
+    set_global_components(madm1_cmps)
 
-    # Build complete component list: ADM1 (27) + sulfur (3)
-    # Following QSDsan pattern from _madm1.py: reuse component INSTANCES from compiled set
-    # This preserves all properties (molar weights, etc.) that were set during ADM1 creation
-    all_cmps_list = list(base_cmps_compiled.tuple) + [S_SO4, S_IS, X_SRB]
-    extended_cmps = Components(all_cmps_list)
-
-    logger.info(f"Extended component set created: {len(extended_cmps)} total components (27 ADM1 + 3 sulfur)")
-
-    # Compile using same flags as ADM1 to preserve properties
-    # This is the KEY FIX per Codex recommendation
-    extended_cmps.default_compile(
-        ignore_inaccurate_molar_weight=True,
-        adjust_MW_to_measured_as=True
-    )
-    # Set active thermo on QSDsan (best-practice wrapper)
-    qs.set_thermo(extended_cmps)
-
-    logger.info("Component thermodynamics set successfully")
-
-    return extended_cmps
+    return madm1_cmps
 
 
 def _init_component_info():
@@ -146,43 +124,59 @@ def _init_component_info():
     if ADM1_SULFUR_CMPS is None:
         raise RuntimeError("Component set not initialized. Call create_adm1_sulfur_cmps() first.")
 
+    # For mADM1, we document key extension components beyond base ADM1
     # Use dynamic indexing to get positions
-    idx_SO4 = ADM1_SULFUR_CMPS.index('S_SO4')
-    idx_IS = ADM1_SULFUR_CMPS.index('S_IS')
-    idx_SRB = ADM1_SULFUR_CMPS.index('X_SRB')
-
     SULFUR_COMPONENT_INFO = {
-        'S_SO4': {
-            'index': idx_SO4,
-            'description': 'Sulfate (SO4 2-)',
-            'units': 'kg S/m3',
-            'i_mass': ADM1_SULFUR_CMPS['S_SO4'].i_mass,
-            'MW': ADM1_SULFUR_CMPS['S_SO4'].chem_MW,
-            'typical_range_mg_l': (10, 500),
-            'notes': 'Substrate for sulfate-reducing bacteria'
-        },
-        'S_IS': {
-            'index': idx_IS,
-            'description': 'Total dissolved sulfide (H2S + HS- + S2-)',
-            'units': 'kg S/m3',
-            'i_mass': ADM1_SULFUR_CMPS['S_IS'].i_mass,
-            'MW': ADM1_SULFUR_CMPS['S_IS'].chem_MW,
-            'typical_range_mg_l': (0.1, 100),
-            'inhibition_threshold_mg_l': 50,
-            'notes': 'Methanogen inhibitor, pH-dependent speciation'
-        },
-        'X_SRB': {
-            'index': idx_SRB,
-            'description': 'Sulfate-reducing biomass (lumped)',
-            'units': 'kg COD/m3',
-            'i_COD': ADM1_SULFUR_CMPS['X_SRB'].i_COD if hasattr(ADM1_SULFUR_CMPS['X_SRB'], 'i_COD') else 1.42,
-            'i_N': ADM1_SULFUR_CMPS['X_SRB'].i_N if hasattr(ADM1_SULFUR_CMPS['X_SRB'], 'i_N') else 0.086,
-            'typical_range_mg_l': (1, 50),
-            'notes': 'Competes with methanogens for H2 and acetate'
+        'total_components': len(ADM1_SULFUR_CMPS),
+        'description': 'Full mADM1 with P/S/Fe extensions (63 components)',
+        'key_components': {
+            'S_SO4': {
+                'index': ADM1_SULFUR_CMPS.index('S_SO4'),
+                'description': 'Sulfate (SO4²⁻)',
+                'units': 'kg S/m³',
+                'typical_range_mg_l': (10, 500)
+            },
+            'S_IS': {
+                'index': ADM1_SULFUR_CMPS.index('S_IS'),
+                'description': 'Total dissolved sulfide (H2S + HS⁻ + S²⁻)',
+                'units': 'kg S/m³',
+                'typical_range_mg_l': (0.1, 100),
+                'inhibition_threshold_mg_l': 50
+            },
+            'X_hSRB': {
+                'index': ADM1_SULFUR_CMPS.index('X_hSRB'),
+                'description': 'Hydrogenotrophic sulfate-reducing bacteria',
+                'units': 'kg/m³',
+                'typical_range_mg_l': (1, 50)
+            },
+            'S_Fe3': {
+                'index': ADM1_SULFUR_CMPS.index('S_Fe3'),
+                'description': 'Ferric iron (Fe³⁺)',
+                'units': 'kg Fe/m³',
+                'typical_range_mg_l': (0, 50)
+            },
+            'S_IP': {
+                'index': ADM1_SULFUR_CMPS.index('S_IP'),
+                'description': 'Inorganic phosphate',
+                'units': 'kg P/m³',
+                'typical_range_mg_l': (5, 50)
+            },
+            'X_PHA': {
+                'index': ADM1_SULFUR_CMPS.index('X_PHA'),
+                'description': 'Polyhydroxyalkanoates (PAO storage)',
+                'units': 'kg/m³',
+                'typical_range_mg_l': (0, 100)
+            },
+            'S_Na': {
+                'index': ADM1_SULFUR_CMPS.index('S_Na'),
+                'description': 'Sodium ion',
+                'units': 'kg Na/m³',
+                'typical_range_mg_l': (50, 300)
+            }
         }
     }
 
-    logger.debug(f"Component info initialized: S_SO4 at {idx_SO4}, S_IS at {idx_IS}, X_SRB at {idx_SRB}")
+    logger.debug(f"Component info initialized for {len(ADM1_SULFUR_CMPS)} mADM1 components")
 
 
 # Component set will be initialized via async loader (utils/qsdsan_loader.py)
@@ -234,9 +228,9 @@ def get_component_info(component_id: str = None):
 
 def verify_component_ordering():
     """
-    Verify that ADM1 component ordering is preserved.
+    Verify that mADM1 component ordering is correct.
 
-    This is critical - ADM1 kinetics depend on specific state vector positions.
+    This is critical - mADM1 kinetics depend on specific state vector positions.
 
     Returns:
         Boolean indicating if ordering is correct
@@ -248,23 +242,33 @@ def verify_component_ordering():
         raise RuntimeError("Component set not initialized")
 
     # Check total count
-    assert len(ADM1_SULFUR_CMPS) == 30, f"Expected 30 components, got {len(ADM1_SULFUR_CMPS)}"
+    assert len(ADM1_SULFUR_CMPS) == 63, f"Expected 63 components, got {len(ADM1_SULFUR_CMPS)}"
 
-    # Check critical ADM1 positions (standard ADM1 is 0-26)
+    # Check critical mADM1 positions
     expected_order = {
         0: 'S_su',
         1: 'S_aa',
         6: 'S_ac',
         7: 'S_h2',
-        10: 'S_IN',   # Corrected: S_IN at 10, not S_IC
-        11: 'S_I',    # Corrected: S_I at 11, not S_IN
+        10: 'S_IN',
+        11: 'S_IP',
+        12: 'S_I',
         23: 'X_I',
-        24: 'S_cat',  # ADM1 component 24
-        25: 'S_an',   # ADM1 component 25
-        26: 'H2O',    # ADM1 component 26
-        27: 'S_SO4',  # First sulfur component
-        28: 'S_IS',   # Second sulfur component
-        29: 'X_SRB'   # Third sulfur component
+        24: 'X_PHA',
+        25: 'X_PP',
+        26: 'X_PAO',
+        27: 'S_K',
+        28: 'S_Mg',
+        29: 'S_SO4',
+        30: 'S_IS',
+        31: 'X_hSRB',
+        36: 'S_Fe3',
+        37: 'S_Fe2',
+        45: 'S_Ca',
+        46: 'S_Al',
+        60: 'S_Na',
+        61: 'S_Cl',
+        62: 'H2O'
     }
 
     for idx, expected_id in expected_order.items():
@@ -272,7 +276,7 @@ def verify_component_ordering():
         assert actual_id == expected_id, \
             f"Component ordering broken: position {idx} is '{actual_id}', expected '{expected_id}'"
 
-    logger.info("Component ordering verified: ADM1 positions 0-26 preserved, sulfur at 27-29")
+    logger.info("Component ordering verified: mADM1 63 components in correct positions")
     return True
 
 
