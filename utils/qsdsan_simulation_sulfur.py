@@ -201,7 +201,13 @@ def initialize_30_component_state(adm1_state_30):
     2. H2S inhibition can be calculated
     3. Sulfur mass balance is meaningful
     """
-    # Per Codex: Need to extract numerics from [value, unit, comment] format
+    # Per Codex: Filter initialization against actual component set to avoid KeyError
+    # Import components here to ensure they're loaded
+    from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS
+
+    if ADM1_SULFUR_CMPS is None:
+        raise RuntimeError("ADM1_SULFUR_CMPS not initialized. Call get_qsdsan_components() first.")
+
     def _to_number(val):
         """Coerce input value to float; handle [value, unit, comment] lists."""
         if isinstance(val, (list, tuple)) and val:
@@ -221,24 +227,34 @@ def initialize_30_component_state(adm1_state_30):
         except Exception:
             return None
 
-    # Extract numeric values from ADM1 state
+    # Filter and align initialization against ADM1_SULFUR_CMPS (30 components)
+    # Per Codex: This prevents KeyError when input state has extra components (e.g., S_IP from mADM1)
+    valid_ids = ADM1_SULFUR_CMPS.IDs
     init_conds = {}
-    for comp_id, raw_val in adm1_state_30.items():
-        num_val = _to_number(raw_val)
-        init_conds[comp_id] = num_val if num_val is not None else 0.0
+    extras = []
 
-    # Check and set sulfate
-    if 'S_SO4' not in init_conds or init_conds['S_SO4'] < 1e-6:
+    for comp_id in valid_ids:
+        raw = adm1_state_30.get(comp_id)
+        val = _to_number(raw) if raw is not None else 0.0
+        init_conds[comp_id] = val
+
+    # Log any components in input that aren't in our component set
+    for comp_id in adm1_state_30:
+        if comp_id not in valid_ids:
+            extras.append(comp_id)
+    if extras:
+        logger.debug(f"Ignoring components not in ADM1_SULFUR_CMPS: {extras}")
+
+    # Apply sulfur defaults (ensure SRB processes can activate)
+    if init_conds.get('S_SO4', 0) < 1e-6:
         init_conds['S_SO4'] = 0.1  # 100 mg S/L
         logger.info("S_SO4 not specified or too low, using default: 0.1 kg S/m3 (100 mg S/L)")
 
-    # Check and set dissolved sulfide
-    if 'S_IS' not in init_conds or init_conds['S_IS'] < 1e-9:
+    if init_conds.get('S_IS', 0) < 1e-9:
         init_conds['S_IS'] = 0.001  # 1 mg S/L
         logger.info("S_IS not specified or zero, using default: 0.001 kg S/m3 (1 mg S/L)")
 
-    # Check and set SRB biomass
-    if 'X_SRB' not in init_conds or init_conds['X_SRB'] < 1e-6:
+    if init_conds.get('X_SRB', 0) < 1e-6:
         init_conds['X_SRB'] = 0.01  # 10 mg COD/L
         logger.info("X_SRB not specified or too low, using default: 0.01 kg COD/m3 (10 mg COD/L)")
 
