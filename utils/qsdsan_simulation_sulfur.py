@@ -88,18 +88,72 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
         # Prepare concentrations for set_flow_by_concentration
         concentrations = {}
 
-        # Standard ADM1 components (27)
+        def _to_number(val):
+            """Coerce input value to float; handle [value, unit, comment] lists."""
+            # Common patterns: val, [val, unit], [val, unit, comment], {'value': val}
+            if isinstance(val, (list, tuple)) and val:
+                try:
+                    return float(val[0])
+                except Exception:
+                    pass
+            elif isinstance(val, dict):
+                for key in ('value', 'val', 'amount'):
+                    if key in val:
+                        try:
+                            return float(val[key])
+                        except Exception:
+                            pass
+            try:
+                return float(val)
+            except Exception:
+                return None
+
+        def _kmol_to_kg_per_m3(comp_id, kmol_per_m3):
+            # Convert kmol/m3 to kg/m3 using component MW (g/mol)
+            # kg/m3 = kmol/m3 * (g/mol) [MW] (see cancellation of 1e3 factors)
+            MW_g_per_mol = ADM1_SULFUR_CMPS[comp_id].chem_MW
+            return kmol_per_m3 * MW_g_per_mol
+
+        # Standard ADM1 components (27). Skip bulk liquid 'H2O' to avoid warnings.
         for comp_id in ADM1_SULFUR_CMPS.IDs[:27]:
+            if comp_id == 'H2O':
+                continue
             if comp_id in adm1_state_30:
-                concentrations[comp_id] = adm1_state_30[comp_id]
+                raw = adm1_state_30[comp_id]
+                # Handle [value, unit, ...] shaped inputs
+                if isinstance(raw, (list, tuple)) and len(raw) >= 2 and isinstance(raw[1], str):
+                    num = _to_number(raw)
+                    unit = raw[1].strip().lower()
+                    if unit == 'kmol/m3':
+                        # Convert to kg/m3 using component MW
+                        concentrations[comp_id] = _kmol_to_kg_per_m3(comp_id, num)
+                    else:
+                        # Treat numeric as kg/m3 of measured_as (e.g., kg C/m3)
+                        concentrations[comp_id] = float(num)
+                else:
+                    num = _to_number(raw)
+                    concentrations[comp_id] = num if num is not None else 1e-6
             else:
                 # Use small default if not specified
                 concentrations[comp_id] = 1e-6
 
         # Sulfur components (3)
-        concentrations['S_SO4'] = adm1_state_30.get('S_SO4', 0.1)  # 100 mg S/L default
-        concentrations['S_IS'] = adm1_state_30.get('S_IS', 0.001)  # Low initial sulfide
-        concentrations['X_SRB'] = adm1_state_30.get('X_SRB', 0.01)  # Seed population
+        for comp_id, default_val in (
+            ('S_SO4', 0.1),   # 100 mg S/L default
+            ('S_IS', 0.001),  # Low initial sulfide
+            ('X_SRB', 0.01),  # Seed population
+        ):
+            raw = adm1_state_30.get(comp_id, default_val)
+            if isinstance(raw, (list, tuple)) and len(raw) >= 2 and isinstance(raw[1], str):
+                num = _to_number(raw)
+                unit = raw[1].strip().lower()
+                if unit == 'kmol/m3':
+                    concentrations[comp_id] = _kmol_to_kg_per_m3(comp_id, num)
+                else:
+                    concentrations[comp_id] = float(num)
+            else:
+                num = _to_number(raw)
+                concentrations[comp_id] = num if num is not None else float(default_val)
 
         # Set flow by concentration
         inf.set_flow_by_concentration(
