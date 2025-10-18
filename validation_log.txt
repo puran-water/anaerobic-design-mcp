@@ -1,0 +1,87 @@
+2025-10-18 09:36:25,659 - __main__ - INFO - Loading QSDsan components...
+2025-10-18 09:36:25,659 - __main__ - INFO - Running validation...
+C:\Users\hvksh\mcp-servers\venv312\Lib\site-packages\qsdsan\__init__.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+2025-10-18 09:36:27,248 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,248 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,248 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,248 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,248 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,248 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,248 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,259 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,259 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,259 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,259 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,259 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,259 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,259 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,260 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:27,261 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,749 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,764 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,764 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,764 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:34,764 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:35,424 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:35,425 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:35,425 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:37,174 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:37,174 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:37,174 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:37,513 - pint.util - WARNING - Redefining 'sq_ft' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,513 - pint.util - WARNING - Redefining 'cu_ft' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,513 - pint.util - WARNING - Redefining 'cu_in' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,513 - pint.util - WARNING - Redefining 'yd3' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,513 - pint.util - WARNING - Redefining 'cu_yd' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,518 - pint.util - WARNING - Redefining 'cfm' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,519 - pint.util - WARNING - Redefining 'yr' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,520 - pint.util - WARNING - Redefining 'yr' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,520 - pint.util - WARNING - Redefining 'hr' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,520 - pint.util - WARNING - Redefining 'hr' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,520 - pint.util - WARNING - Redefining 'h' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,521 - pint.util - WARNING - Redefining 'd' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:37,522 - pint.util - WARNING - Redefining 'point' (<class 'pint.delegates.txt_defparser.plain.UnitDefinition'>)
+2025-10-18 09:36:38,147 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,147 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,151 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,152 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,194 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,194 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,202 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,202 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,202 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,202 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,202 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,202 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,208 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:38,624 - utils.extract_qsdsan_sulfur_components - INFO - Component set initialization deferred to async loader
+2025-10-18 09:36:38,624 - utils.extract_qsdsan_sulfur_components - INFO - Creating extended ADM1+sulfur component set (30 components)
+2025-10-18 09:36:38,624 - utils.extract_qsdsan_sulfur_components - WARNING - mADM1 module not available (requires QSDsan adm1 branch)
+2025-10-18 09:36:39,344 - pint.util - WARNING - Calling the getitem method from a UnitRegistry is deprecated. use `parse_expression` method or use the registry as a callable.
+2025-10-18 09:36:39,546 - utils.extract_qsdsan_sulfur_components - INFO - Loaded 27 standard ADM1 components
+2025-10-18 09:36:39,546 - utils.extract_qsdsan_sulfur_components - INFO - Creating sulfur components manually from QSDsan primitives
+2025-10-18 09:36:39,561 - utils.extract_qsdsan_sulfur_components - INFO - Created sulfur components manually (mADM1 not available)
+2025-10-18 09:36:39,561 - utils.extract_qsdsan_sulfur_components - INFO - Extended component set created: 30 total components (27 ADM1 + 3 sulfur)
+2025-10-18 09:36:39,780 - utils.extract_qsdsan_sulfur_components - INFO - Component thermodynamics set successfully
+C:\Users\hvksh\mcp-servers\venv312\Lib\site-packages\qsdsan\_waste_stream.py:800: UserWarning: No `TKN` group defined for the current `CompiledComponents`, `TKN` will be calculated using `TN` minus concentrations of "S_N2", "S_NO2", and "S_NO3". Use `define_group` to define the TKN groups if want to calculate otherwise.
+  warn('No `TKN` group defined for the current `CompiledComponents`, '
+2025-10-18 09:36:39,907 - __main__ - INFO - Validation complete

@@ -201,7 +201,31 @@ def initialize_30_component_state(adm1_state_30):
     2. H2S inhibition can be calculated
     3. Sulfur mass balance is meaningful
     """
-    init_conds = adm1_state_30.copy()
+    # Per Codex: Need to extract numerics from [value, unit, comment] format
+    def _to_number(val):
+        """Coerce input value to float; handle [value, unit, comment] lists."""
+        if isinstance(val, (list, tuple)) and val:
+            try:
+                return float(val[0])
+            except Exception:
+                pass
+        elif isinstance(val, dict):
+            for key in ('value', 'val', 'amount'):
+                if key in val:
+                    try:
+                        return float(val[key])
+                    except Exception:
+                        pass
+        try:
+            return float(val)
+        except Exception:
+            return None
+
+    # Extract numeric values from ADM1 state
+    init_conds = {}
+    for comp_id, raw_val in adm1_state_30.items():
+        num_val = _to_number(raw_val)
+        init_conds[comp_id] = num_val if num_val is not None else 0.0
 
     # Check and set sulfate
     if 'S_SO4' not in init_conds or init_conds['S_SO4'] < 1e-6:

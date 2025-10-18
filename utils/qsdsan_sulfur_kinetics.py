@@ -461,18 +461,29 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     rate_SRB_ac_func = sulfate_processes['growth_SRB_ac'].rate_function
     rate_SRB_decay_func = sulfate_processes['decay_SRB'].rate_function
 
-    # Combine ADM1 + SRB processes (structure)
+    # Define ADM1_Sulfur subclass that extends biogas tracking to include H2S
+    # Per mADM1 reference (qsdsan_madm1.py:618): Extend _biogas_IDs to add H2S tracking
+    # NOTE: Component ID is 'S_IS' (Inorganic Sulfide), not 'S_h2s'!
+    class ADM1_Sulfur(base_adm1.__class__):
+        """ADM1 + Sulfate Reduction with H2S biogas tracking."""
+        # Extend base ADM1 attributes (same pattern as ModifiedADM1)
+        _biogas_IDs = (*base_adm1._biogas_IDs, 'S_IS')  # Add S_IS (H2S) to gas phase!
+        _biomass_IDs = (*base_adm1._biomass_IDs, 'X_SRB')  # Add SRB biomass
+        _acid_base_pairs = base_adm1._acid_base_pairs  # Inherit acid-base pairs
+
+    # Combine ADM1 + SRB processes (create Processes object without compiling yet)
+    # Per mADM1 reference (qsdsan_madm1.py:668-728): Modify BEFORE calling compile()
     adm1_process_list = list(base_adm1.tuple)
     srb_process_list = list(sulfate_processes)
-    combined_processes = Processes(adm1_process_list + srb_process_list)
+    processes = Processes(adm1_process_list + srb_process_list)
+
+    # Now compile to ADM1_Sulfur class
+    # Per mADM1 reference: Use Processes.compile(to_class=cls) pattern
+    processes.compile(to_class=ADM1_Sulfur)
 
     logger.info(f"Combined {len(adm1_process_list)} ADM1 + {len(srb_process_list)} SRB processes")
-
-    # Compile to CompiledProcesses (enables set_rate_function method)
-    # Per Codex: compile() modifies object in-place and returns None
-    # After compilation, combined_processes becomes CompiledProcesses
-    combined_processes.compile()
-    logger.debug(f"Compiled to {type(combined_processes).__name__}")
+    logger.info(f"Biogas IDs (includes H2S): {processes._biogas_IDs}")
+    logger.debug(f"Compiled to {type(processes).__name__}")
 
     # Create custom rate function with H2S inhibition
     # Pass the captured base ADM1 components and parameters for _rhos_adm1 calls
@@ -484,7 +495,7 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     )
 
     # Set the custom rate function on the compiled process
-    combined_processes.set_rate_function(custom_rate_func)
+    processes.set_rate_function(custom_rate_func)
 
     # Merge base ADM1 parameters with SRB parameters
     combined_params = base_params.copy()
@@ -492,13 +503,13 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     combined_params['components'] = ADM1_SULFUR_CMPS
 
     # Set parameters on the rate function
-    combined_processes.rate_function.set_params(**combined_params)
+    processes.rate_function.set_params(**combined_params)
     logger.debug(f"Set {len(combined_params)} parameters on custom rate function")
 
     logger.info("Custom rate function set with H2S inhibition on methanogens")
     logger.info(f"Final model: 25 processes (22 ADM1 + 3 SRB) with H2S inhibition")
 
-    return combined_processes
+    return processes
 
 
 def get_h2s_inhibition_factors(S_IS_kg_m3: float) -> dict:

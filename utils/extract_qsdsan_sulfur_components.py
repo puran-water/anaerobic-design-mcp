@@ -16,7 +16,7 @@ Attribution:
 """
 import logging
 from qsdsan import Component, Components
-from thermosteam import settings
+import qsdsan as qs
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,8 @@ def create_adm1_sulfur_cmps():
         ignore_inaccurate_molar_weight=True,
         adjust_MW_to_measured_as=True
     )
-    settings.set_thermo(extended_cmps)
+    # Set active thermo on QSDsan (best-practice wrapper)
+    qs.set_thermo(extended_cmps)
 
     logger.info("Component thermodynamics set successfully")
 
