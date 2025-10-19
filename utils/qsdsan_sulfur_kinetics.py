@@ -14,10 +14,32 @@ Attribution:
 """
 import logging
 import numpy as np
-from qsdsan import Process, Processes
+from qsdsan import Process, Processes, CompiledProcesses
 from qsdsan.processes._adm1 import substr_inhibit, non_compet_inhibit, ADM1
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# ADM1_Sulfur - Custom CompiledProcesses subclass with H2S biogas tracking
+# ============================================================================
+
+class ADM1_Sulfur(CompiledProcesses):
+    """
+    ADM1 + Sulfate Reduction with H2S biogas tracking.
+
+    Per mADM1 reference (qsdsan_madm1.py:410-618): Define process model subclass
+    that extends ADM1 biogas tracking to include H2S (S_IS component).
+
+    This class will be used with Processes.compile(to_class=ADM1_Sulfur) to create
+    an instance with the extended attributes.
+    """
+    # Will be set dynamically in extend_adm1_with_sulfate_and_inhibition()
+    # based on runtime ADM1 instance
+    _biogas_IDs = None
+    _biomass_IDs = None
+    _acid_base_pairs = None
+    _stoichio_params = None
+    _kinetic_params = None
 
 # ============================================================================
 # KINETIC PARAMETERS FROM QSDsan mADM1
@@ -438,6 +460,7 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     else:
         temp_adm1 = base_adm1
     base_params = temp_adm1.rate_function.params.copy()
+    base_stoich_params = temp_adm1.parameters.copy()
 
     # Create a minimal Components-like object for base 27 components
     # _rhos_adm1 needs this to access component properties
@@ -461,15 +484,21 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     rate_SRB_ac_func = sulfate_processes['growth_SRB_ac'].rate_function
     rate_SRB_decay_func = sulfate_processes['decay_SRB'].rate_function
 
-    # Define ADM1_Sulfur subclass that extends biogas tracking to include H2S
-    # Per mADM1 reference (qsdsan_madm1.py:618): Extend _biogas_IDs to add H2S tracking
-    # NOTE: Component ID is 'S_IS' (Inorganic Sulfide), not 'S_h2s'!
-    class ADM1_Sulfur(base_adm1.__class__):
-        """ADM1 + Sulfate Reduction with H2S biogas tracking."""
-        # Extend base ADM1 attributes (same pattern as ModifiedADM1)
-        _biogas_IDs = (*base_adm1._biogas_IDs, 'S_IS')  # Add S_IS (H2S) to gas phase!
-        _biomass_IDs = (*base_adm1._biomass_IDs, 'X_SRB')  # Add SRB biomass
-        _acid_base_pairs = base_adm1._acid_base_pairs  # Inherit acid-base pairs
+    # Per mADM1 reference (qsdsan_madm1.py:618): Set class attributes BEFORE compilation
+    # Extend biogas tracking to include H2S (S_IS component)
+    ADM1_Sulfur._biogas_IDs = (*base_adm1._biogas_IDs, 'S_IS')
+    ADM1_Sulfur._biomass_IDs = (*base_adm1._biomass_IDs, 'X_SRB')
+    ADM1_Sulfur._acid_base_pairs = base_adm1._acid_base_pairs
+    ADM1_Sulfur._stoichio_params = (*base_adm1._stoichio_params,)
+    # Kinetic params: inherit ALL from ADM1 (including 'root') + add 'KIs_h2s'
+    # Insert KIs_h2s AFTER KIs_h2 (index 6) but BEFORE the rest
+    ADM1_Sulfur._kinetic_params = (*base_adm1._kinetic_params[:7],
+                                    'KIs_h2s',
+                                    *base_adm1._kinetic_params[7:])
+
+    logger.info(f"Set ADM1_Sulfur class attributes:")
+    logger.info(f"  Biogas IDs (includes H2S): {ADM1_Sulfur._biogas_IDs}")
+    logger.info(f"  Biomass IDs: {ADM1_Sulfur._biomass_IDs}")
 
     # Combine ADM1 + SRB processes (create Processes object without compiling yet)
     # Per mADM1 reference (qsdsan_madm1.py:668-728): Modify BEFORE calling compile()
@@ -482,8 +511,8 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     processes.compile(to_class=ADM1_Sulfur)
 
     logger.info(f"Combined {len(adm1_process_list)} ADM1 + {len(srb_process_list)} SRB processes")
-    logger.info(f"Biogas IDs (includes H2S): {processes._biogas_IDs}")
     logger.debug(f"Compiled to {type(processes).__name__}")
+    logger.debug(f"Processes object _biogas_IDs: {processes._biogas_IDs}")
 
     # Create custom rate function with H2S inhibition
     # Pass the captured base ADM1 components and parameters for _rhos_adm1 calls
@@ -497,14 +526,46 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     # Set the custom rate function on the compiled process
     processes.set_rate_function(custom_rate_func)
 
-    # Merge base ADM1 parameters with SRB parameters
-    combined_params = base_params.copy()
-    combined_params.update(SRB_PARAMETERS)
-    combined_params['components'] = ADM1_SULFUR_CMPS
+    # Per mADM1 reference (qsdsan_madm1.py:776-786): Set parameters using the proper pattern
+    # 1. Extract stoichiometric parameter values from base_params
+    try:
+        stoichio_vals = tuple(base_stoich_params[p] for p in ADM1_Sulfur._stoichio_params)
+    except KeyError as err:
+        missing_key = err.args[0]
+        raise KeyError(f"Missing stoichiometric parameter '{missing_key}' in base ADM1 parameters.") from err
 
-    # Set parameters on the rate function
-    processes.rate_function.set_params(**combined_params)
-    logger.debug(f"Set {len(combined_params)} parameters on custom rate function")
+    # 2. Prepare kinetic parameter values (matching the order in _kinetic_params)
+    # ADM1_Sulfur._kinetic_params includes 'root' at the end (inherited from ADM1)
+    # We need to provide all ADM1 params + KIs_h2s in the right order
+    kinetic_vals = [
+        base_params.get('rate_constants'),
+        base_params.get('half_sat_coeffs'),
+        base_params.get('pH_ULs'),
+        base_params.get('pH_LLs'),
+        base_params.get('KS_IN'),
+        base_params.get('KI_nh3'),
+        base_params.get('KIs_h2'),
+        # H2S inhibition coefficient (from our SRB_PARAMETERS)
+        H2S_INHIBITION['KI_h2s_ac'],  # Use acetoclastic methanogen KI as representative
+        # Remaining ADM1 kinetic params (Ka through components)
+        base_params.get('Ka_base'),
+        base_params.get('Ka_dH'),
+        base_params.get('K_H_base'),
+        base_params.get('K_H_dH'),
+        base_params.get('kLa'),
+        base_params.get('T_base'),
+        ADM1_SULFUR_CMPS,  # components
+        base_params.get('root')  # TempState for intermediate calculations
+    ]
+
+    # 3. Set _parameters on the CompiledProcesses object (stoichiometric)
+    processes.__dict__['_parameters'] = dict(zip(ADM1_Sulfur._stoichio_params, stoichio_vals))
+
+    # 4. Set _params on the rate function (kinetic)
+    processes.rate_function._params = dict(zip(ADM1_Sulfur._kinetic_params, kinetic_vals))
+
+    logger.debug(f"Set {len(stoichio_vals)} stoichiometric parameters on processes object")
+    logger.debug(f"Set {len(kinetic_vals)} kinetic parameters on rate function")
 
     logger.info("Custom rate function set with H2S inhibition on methanogens")
     logger.info(f"Final model: 25 processes (22 ADM1 + 3 SRB) with H2S inhibition")

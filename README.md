@@ -2,11 +2,14 @@
 
 An MCP server for anaerobic digester design using QSDsan with the **mADM1 (Modified ADM1) model** featuring 62 state variables + H2O (63 total components), including phosphorus, sulfur, and iron extensions for comprehensive nutrient recovery modeling.
 
+**Repository**: https://github.com/puran-water/anaerobic-design-mcp (Private)
+
 ## Installation
 
 ```bash
 # Clone the repository
-cd /mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp
+git clone git@github.com:puran-water/anaerobic-design-mcp.git
+cd anaerobic-design-mcp
 
 # Install dependencies
 pip install -e .

@@ -57,7 +57,14 @@ credentials/
 
 # Project specific
 adm1_state.json
+adm1_state_*.json
+adm1_influent_state.json
 simulation_results.json
+simulation_adm1_state.json
+tmp*.json
+comps*.json
+validation_result.json
+version.json
 *.zip
 
 # Temporary files
