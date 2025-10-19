@@ -132,45 +132,45 @@ def _init_component_info():
         'key_components': {
             'S_SO4': {
                 'index': ADM1_SULFUR_CMPS.index('S_SO4'),
-                'description': 'Sulfate (SO4²⁻)',
-                'units': 'kg S/m³',
+                'description': 'Sulfate (SO4 2-)',
+                'units': 'kg S/m3',
                 'typical_range_mg_l': (10, 500)
             },
             'S_IS': {
                 'index': ADM1_SULFUR_CMPS.index('S_IS'),
-                'description': 'Total dissolved sulfide (H2S + HS⁻ + S²⁻)',
-                'units': 'kg S/m³',
+                'description': 'Total dissolved sulfide (H2S + HS- + S2-)',
+                'units': 'kg S/m3',
                 'typical_range_mg_l': (0.1, 100),
                 'inhibition_threshold_mg_l': 50
             },
             'X_hSRB': {
                 'index': ADM1_SULFUR_CMPS.index('X_hSRB'),
                 'description': 'Hydrogenotrophic sulfate-reducing bacteria',
-                'units': 'kg/m³',
+                'units': 'kg/m3',
                 'typical_range_mg_l': (1, 50)
             },
             'S_Fe3': {
                 'index': ADM1_SULFUR_CMPS.index('S_Fe3'),
-                'description': 'Ferric iron (Fe³⁺)',
-                'units': 'kg Fe/m³',
+                'description': 'Ferric iron (Fe 3+)',
+                'units': 'kg Fe/m3',
                 'typical_range_mg_l': (0, 50)
             },
             'S_IP': {
                 'index': ADM1_SULFUR_CMPS.index('S_IP'),
                 'description': 'Inorganic phosphate',
-                'units': 'kg P/m³',
+                'units': 'kg P/m3',
                 'typical_range_mg_l': (5, 50)
             },
             'X_PHA': {
                 'index': ADM1_SULFUR_CMPS.index('X_PHA'),
                 'description': 'Polyhydroxyalkanoates (PAO storage)',
-                'units': 'kg/m³',
+                'units': 'kg/m3',
                 'typical_range_mg_l': (0, 100)
             },
             'S_Na': {
                 'index': ADM1_SULFUR_CMPS.index('S_Na'),
                 'description': 'Sodium ion',
-                'units': 'kg Na/m³',
+                'units': 'kg Na/m3',
                 'typical_range_mg_l': (50, 300)
             }
         }
@@ -202,28 +202,29 @@ def set_global_components(components):
 
 def get_component_info(component_id: str = None):
     """
-    Get information about sulfur components.
+    Get information about mADM1 key components.
 
     Args:
-        component_id: Optional component ID ('S_SO4', 'S_IS', 'X_SRB').
-                     If None, returns info for all sulfur components.
+        component_id: Optional component ID (e.g., 'S_SO4', 'S_IS', 'X_hSRB').
+                     If None, returns info for all components.
 
     Returns:
         Dictionary with component information
 
     Example:
         >>> info = get_component_info('S_SO4')
-        >>> print(f"Sulfate MW: {info['MW']:.2f} g/mol")
+        >>> print(f"Sulfate index: {info['index']}")
     """
     if SULFUR_COMPONENT_INFO is None:
         raise RuntimeError("Component info not initialized")
 
     if component_id is None:
         return SULFUR_COMPONENT_INFO
-    elif component_id in SULFUR_COMPONENT_INFO:
-        return SULFUR_COMPONENT_INFO[component_id]
+    elif component_id in SULFUR_COMPONENT_INFO.get('key_components', {}):
+        return SULFUR_COMPONENT_INFO['key_components'][component_id]
     else:
-        raise ValueError(f"Unknown component ID: {component_id}. Valid IDs: S_SO4, S_IS, X_SRB")
+        valid_ids = ', '.join(SULFUR_COMPONENT_INFO.get('key_components', {}).keys())
+        raise ValueError(f"Unknown component ID: {component_id}. Valid IDs: {valid_ids}")
 
 
 def verify_component_ordering():
@@ -231,6 +232,7 @@ def verify_component_ordering():
     Verify that mADM1 component ordering is correct.
 
     This is critical - mADM1 kinetics depend on specific state vector positions.
+    Checks ALL 63 component positions against the expected order.
 
     Returns:
         Boolean indicating if ordering is correct
@@ -244,39 +246,32 @@ def verify_component_ordering():
     # Check total count
     assert len(ADM1_SULFUR_CMPS) == 63, f"Expected 63 components, got {len(ADM1_SULFUR_CMPS)}"
 
-    # Check critical mADM1 positions
-    expected_order = {
-        0: 'S_su',
-        1: 'S_aa',
-        6: 'S_ac',
-        7: 'S_h2',
-        10: 'S_IN',
-        11: 'S_IP',
-        12: 'S_I',
-        23: 'X_I',
-        24: 'X_PHA',
-        25: 'X_PP',
-        26: 'X_PAO',
-        27: 'S_K',
-        28: 'S_Mg',
-        29: 'S_SO4',
-        30: 'S_IS',
-        31: 'X_hSRB',
-        36: 'S_Fe3',
-        37: 'S_Fe2',
-        45: 'S_Ca',
-        46: 'S_Al',
-        60: 'S_Na',
-        61: 'S_Cl',
-        62: 'H2O'
-    }
+    # Complete expected order for ALL 63 components
+    # Based on qsdsan_madm1.py:212-223 and .codex/AGENTS.md:385-398
+    expected_full_order = [
+        'S_su', 'S_aa', 'S_fa', 'S_va', 'S_bu', 'S_pro', 'S_ac', 'S_h2', 'S_ch4',
+        'S_IC', 'S_IN', 'S_IP', 'S_I',
+        'X_ch', 'X_pr', 'X_li', 'X_su', 'X_aa', 'X_fa', 'X_c4', 'X_pro', 'X_ac', 'X_h2', 'X_I',
+        'X_PHA', 'X_PP', 'X_PAO',
+        'S_K', 'S_Mg',
+        'S_SO4', 'S_IS', 'X_hSRB', 'X_aSRB', 'X_pSRB', 'X_c4SRB', 'S_S0',
+        'S_Fe3', 'S_Fe2',
+        'X_HFO_H', 'X_HFO_L', 'X_HFO_old', 'X_HFO_HP', 'X_HFO_LP', 'X_HFO_HP_old', 'X_HFO_LP_old',
+        'S_Ca', 'S_Al',
+        'X_CCM', 'X_ACC', 'X_ACP', 'X_HAP', 'X_DCPD', 'X_OCP',
+        'X_struv', 'X_newb', 'X_magn', 'X_kstruv',
+        'X_FeS', 'X_Fe3PO42', 'X_AlPO4',
+        'S_Na', 'S_Cl',
+        'H2O'
+    ]
 
-    for idx, expected_id in expected_order.items():
+    # Verify all 63 positions
+    for idx, expected_id in enumerate(expected_full_order):
         actual_id = ADM1_SULFUR_CMPS.IDs[idx]
         assert actual_id == expected_id, \
-            f"Component ordering broken: position {idx} is '{actual_id}', expected '{expected_id}'"
+            f"Component ordering broken at position {idx}: found '{actual_id}', expected '{expected_id}'"
 
-    logger.info("Component ordering verified: mADM1 63 components in correct positions")
+    logger.info("Component ordering verified: ALL 63 mADM1 components in correct positions")
     return True
 
 
@@ -284,7 +279,18 @@ if __name__ == "__main__":
     # Test the module
     logging.basicConfig(level=logging.INFO)
 
-    print("=== QSDsan Sulfur Component Extraction Test ===\n")
+    print("=== mADM1 Component Loader Test ===\n")
+
+    # Initialize component set first
+    print("0. Initializing mADM1 components...")
+    try:
+        cmps = create_adm1_sulfur_cmps()
+        print(f"   [OK] Loaded {len(cmps)} components\n")
+    except Exception as e:
+        print(f"   [FAIL] Component initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
 
     # 1. Verify component set
     print("1. Component Set:")
@@ -293,24 +299,26 @@ if __name__ == "__main__":
     print(f"   Last 5: {ADM1_SULFUR_CMPS.IDs[-5:]}")
     print()
 
-    # 2. Verify ordering
+    # 2. Verify ordering (now checks all 63 components)
     print("2. Component Ordering Verification:")
     try:
         verify_component_ordering()
-        print("   [OK] Component ordering is correct")
+        print("   [OK] All 63 component positions verified")
     except AssertionError as e:
         print(f"   [FAIL] Component ordering error: {e}")
+        exit(1)
     print()
 
-    # 3. Sulfur component info
-    print("3. Sulfur Component Details:")
-    for cid in ['S_SO4', 'S_IS', 'X_SRB']:
-        info = get_component_info(cid)
-        print(f"   {cid} (position {info['index']}):")
-        print(f"      Description: {info['description']}")
-        print(f"      Units: {info['units']}")
-        if 'MW' in info:
-            print(f"      Molecular weight: {info['MW']:.2f} g/mol")
-        if 'typical_range_mg_l' in info:
-            print(f"      Typical range: {info['typical_range_mg_l'][0]}-{info['typical_range_mg_l'][1]} mg/L")
-        print()
+    # 3. Key component info
+    print("3. Key mADM1 Component Details:")
+    for cid in ['S_SO4', 'S_IS', 'X_hSRB', 'S_Fe3', 'S_IP', 'X_PHA', 'S_Na']:
+        try:
+            info = get_component_info(cid)
+            print(f"   {cid} (position {info['index']}):")
+            print(f"      Description: {info['description']}")
+            print(f"      Units: {info['units']}")
+            if 'typical_range_mg_l' in info:
+                print(f"      Typical range: {info['typical_range_mg_l'][0]}-{info['typical_range_mg_l'][1]} mg/L")
+            print()
+        except ValueError as e:
+            print(f"   [SKIP] {cid}: {e}\n")

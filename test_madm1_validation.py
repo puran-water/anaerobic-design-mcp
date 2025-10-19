@@ -112,9 +112,104 @@ def create_test_madm1_state():
     return state
 
 
+def test_component_info_helpers():
+    """
+    Regression test for component info helpers (Codex review finding).
+
+    Tests:
+    - get_component_info() returns correct nested dict structure
+    - Error messages show valid component IDs
+    - verify_component_ordering() checks all 63 positions
+    """
+    from utils.extract_qsdsan_sulfur_components import (
+        create_adm1_sulfur_cmps,
+        get_component_info,
+        verify_component_ordering
+    )
+
+    print("="*80)
+    print("Component Info Helper Regression Tests")
+    print("="*80)
+    print()
+
+    # Initialize components
+    print("0. Initializing mADM1 components...")
+    cmps = create_adm1_sulfur_cmps()
+    print(f"   [OK] Loaded {len(cmps)} components\n")
+
+    # Test 1: get_component_info() with valid ID
+    print("1. Testing get_component_info() with valid IDs...")
+    for cid in ['S_SO4', 'S_IS', 'X_hSRB', 'S_Fe3', 'S_IP', 'X_PHA', 'S_Na']:
+        try:
+            info = get_component_info(cid)
+            assert 'index' in info, f"{cid}: missing 'index' key"
+            assert 'description' in info, f"{cid}: missing 'description' key"
+            assert 'units' in info, f"{cid}: missing 'units' key"
+            print(f"   [OK] {cid}: index={info['index']}, {info['description']}")
+        except Exception as e:
+            print(f"   [FAIL] {cid}: {e}")
+            return 1
+    print()
+
+    # Test 2: get_component_info() with invalid ID
+    print("2. Testing get_component_info() with invalid ID...")
+    try:
+        get_component_info('INVALID_COMPONENT')
+        print("   [FAIL] Should have raised ValueError")
+        return 1
+    except ValueError as e:
+        error_msg = str(e)
+        # Check that error message lists valid IDs
+        assert 'Valid IDs:' in error_msg, "Error message should list valid IDs"
+        assert 'S_SO4' in error_msg, "Error message should include S_SO4"
+        print(f"   [OK] Raised ValueError with valid IDs: {error_msg[:80]}...")
+    print()
+
+    # Test 3: verify_component_ordering() checks all 63
+    print("3. Testing verify_component_ordering() checks all 63 positions...")
+    try:
+        result = verify_component_ordering()
+        assert result == True, "verify_component_ordering() should return True"
+        print("   [OK] All 63 component positions verified")
+    except Exception as e:
+        print(f"   [FAIL] {e}")
+        return 1
+    print()
+
+    # Test 4: get_component_info() without ID returns full dict
+    print("4. Testing get_component_info() returns full dict...")
+    try:
+        full_info = get_component_info()
+        assert 'total_components' in full_info, "Missing 'total_components'"
+        assert 'key_components' in full_info, "Missing 'key_components'"
+        assert full_info['total_components'] == 63, f"Expected 63, got {full_info['total_components']}"
+        print(f"   [OK] Full info dict: {full_info['total_components']} components, {len(full_info['key_components'])} documented")
+    except Exception as e:
+        print(f"   [FAIL] {e}")
+        return 1
+    print()
+
+    print("="*80)
+    print("All component info helper tests PASSED")
+    print("="*80)
+    print()
+
+    return 0
+
+
 def main():
     print("="*80)
-    print("mADM1 Validation Test (63 components)")
+    print("mADM1 Validation Test Suite")
+    print("="*80)
+    print()
+
+    # Run component info helper tests first
+    result = test_component_info_helpers()
+    if result != 0:
+        return result
+
+    print("="*80)
+    print("mADM1 Validation Functions Test")
     print("="*80)
     print()
 

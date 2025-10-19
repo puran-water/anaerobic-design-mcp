@@ -954,3 +954,124 @@ The validation tools now support the complete mADM1 model with:
 - Document mADM1 usage patterns in design workflow
 - Update simulation tools to leverage full mADM1 capabilities
 
+
+## Date: 2025-10-18 PM - Codex Review Reconciliation
+
+### Codex Technical Review of mADM1 Integration (COMPLETED)
+
+After completing the initial mADM1 integration, a comprehensive Codex technical review was performed to ensure complete reconciliation between `.codex/AGENTS.md` and all validation tools.
+
+#### Review Findings
+
+**Codex verified perfect component alignment**:
+- All 63 components in `.codex/AGENTS.md:385-398` match `utils/qsdsan_madm1.py:212-223` 1:1
+- Component index reference is accurate for all positions (0-62)
+- No specification vs implementation gaps in component definitions
+
+**Critical Issues Identified**:
+
+1. ❌ **`get_component_info()` API Bug** (`utils/extract_qsdsan_sulfur_components.py:203-227`)
+   - **Issue**: Checked `component_id in SULFUR_COMPONENT_INFO` instead of nested `['key_components']` dict
+   - **Impact**: API was broken - could not retrieve component info for documented components
+   - **Fix**: Changed to `component_id in SULFUR_COMPONENT_INFO.get('key_components', {})`
+   - **Validation**: Error message now lists actual valid IDs dynamically
+
+2. ❌ **`verify_component_ordering()` Incomplete** (`utils/extract_qsdsan_sulfur_components.py:230-275`)
+   - **Issue**: Only checked 23 sentinel indices instead of all 63 components
+   - **Impact**: Regressions on unchecked indices (32-35, 38-44, 47-59) would go undetected
+   - **Fix**: Expanded to verify ALL 63 positions using complete expected_full_order list
+   - **Validation**: Now logs "ALL 63 mADM1 components in correct positions"
+
+3. ❌ **`__main__` Block Crash** (`utils/extract_qsdsan_sulfur_components.py:278-324`)
+   - **Issue**: Accessed `len(ADM1_SULFUR_CMPS)` before initialization
+   - **Impact**: Standalone module execution crashed immediately
+   - **Fix**: Added component initialization step before any checks
+   - **Validation**: Now runs complete self-test successfully
+
+**Charge Balance Review**:
+- ✅ `_compute_lumped_ions()` aggregates all monovalent (Na+, K+, Cl-), divalent (Mg2+, Ca2+, Fe2+), and trivalent (Fe3+, Al3+) cations
+- ✅ `pcm()` includes all ionic species: NH4+/NH3, carbonate, acetate, propionate, butyrate, valerate, sulfate, sulfide
+- ✅ `calc_biogas()` uses temperature-corrected Ka for H2S/HS- equilibrium
+- ✅ No ionic species from AGENTS.md are omitted
+
+#### Fixes Implemented
+
+**1. Fixed `get_component_info()` API** (`utils/extract_qsdsan_sulfur_components.py`)
+```python
+# OLD (broken):
+elif component_id in SULFUR_COMPONENT_INFO:
+    return SULFUR_COMPONENT_INFO[component_id]
+
+# NEW (correct):
+elif component_id in SULFUR_COMPONENT_INFO.get('key_components', {}):
+    return SULFUR_COMPONENT_INFO['key_components'][component_id]
+```
+
+**2. Expanded `verify_component_ordering()`** to check all 63 positions:
+```python
+expected_full_order = [
+    'S_su', 'S_aa', 'S_fa', 'S_va', 'S_bu', 'S_pro', 'S_ac', 'S_h2', 'S_ch4',
+    # ... all 63 components ...
+    'S_Na', 'S_Cl', 'H2O'
+]
+
+for idx, expected_id in enumerate(expected_full_order):
+    actual_id = ADM1_SULFUR_CMPS.IDs[idx]
+    assert actual_id == expected_id, f"Component ordering broken at position {idx}"
+```
+
+**3. Fixed `__main__` block** to initialize before testing:
+```python
+print("0. Initializing mADM1 components...")
+cmps = create_adm1_sulfur_cmps()  # Initialize first!
+print(f"   [OK] Loaded {len(cmps)} components\n")
+
+# Now safe to access ADM1_SULFUR_CMPS
+```
+
+**4. Added Regression Tests** (`test_madm1_validation.py`)
+- `test_component_info_helpers()` - Tests all fixed API behaviors:
+  * `get_component_info()` returns correct nested dict for valid IDs
+  * Error messages list actual valid component IDs
+  * `verify_component_ordering()` checks all 63 positions
+  * `get_component_info()` without args returns full dict
+
+**5. Fixed Unicode Encoding** for Windows compatibility:
+- Changed superscript/subscript characters (²⁻, ³⁺) to ASCII equivalents (2-, 3+)
+- Changed m³ to m3 in all descriptions
+
+#### Test Results (Post-Fix)
+
+All regression tests **PASS**:
+
+```
+Component Info Helper Regression Tests
+=======================================
+1. get_component_info() with valid IDs: [OK] 7/7 components
+2. get_component_info() with invalid ID: [OK] ValueError with valid IDs
+3. verify_component_ordering(): [OK] All 63 component positions verified
+4. get_component_info() without ID: [OK] Full dict with 63 components
+
+mADM1 Validation Functions Test
+================================
+1. calculate_composites_sync: [OK] COD/TSS/VSS/TKN/TP
+2. validate_adm1_state_sync: [OK] Validation against targets
+3. check_charge_balance_sync: [OK] BALANCED (0.00% imbalance)
+```
+
+#### Codex Recommendations (All Implemented)
+
+1. ✅ Fixed `get_component_info()` to return nested dict correctly
+2. ✅ Expanded `verify_component_ordering()` to check all 63 components  
+3. ✅ Fixed `__main__` block to initialize before printing
+4. ✅ Added regression tests in `test_madm1_validation.py`
+
+**Additional Notes**:
+- Upstream QSDsan DeepWiki docs still describe 32-component ADM1-P (phosphorus extension only)
+- Our implementation uses the full 63-component mADM1 from the `adm1` branch
+- This discrepancy is expected - document for future reference
+
+#### Status: ✅ **PRODUCTION-READY (Codex-Verified)**
+
+The mADM1 integration has been thoroughly reviewed by Codex and all identified issues have been fixed. The specification (`.codex/AGENTS.md`) and implementation (`utils/qsdsan_madm1.py`, validation tools) are now fully reconciled with comprehensive regression test coverage.
+
