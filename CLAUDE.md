@@ -1,4 +1,4 @@
-# Claude Integration Guide for Anaerobic Digester Design MCP
+# Claude Code System Prompt - Anaerobic Digester Design MCP
 
 ## CRITICAL INSTRUCTIONS - MUST FOLLOW
 
@@ -28,11 +28,11 @@ input()  # WAIT for user confirmation
 - Prepare monitoring/logging
 - Ensure the environment is ready
 
-## Overview
+## MCP Servers Available
 
-This project provides two MCP servers that work together:
-1. **anaerobic-design**: Main server for anaerobic digester design workflow
-2. **ADM1-State-Variable-Estimator**: Codex-based server for intelligent feedstock characterization
+Two MCP servers work together in this project:
+1. **anaerobic-design**: Main server with tools for basis of design, sizing, simulation
+2. **ADM1-State-Variable-Estimator**: Codex-based server for mADM1 state generation (GPT-5, high reasoning effort)
 
 ## COMPLETE WORKFLOW - MUST FOLLOW ALL STEPS
 
@@ -138,14 +138,69 @@ mcp__anaerobic-design__heuristic_sizing_ad(
 )
 ```
 
-### Step 5: Run QSDsan Simulation
+### Step 5: Run QSDsan Simulation ⚠️ REQUIRED
+
+**CRITICAL**: The simulation MUST be run as part of the complete workflow test. This validates that the Codex-generated ADM1 state works correctly with QSDsan's mADM1 process model.
+
+#### Option A: Using MCP Tool (Returns CLI Command)
+
+```python
+mcp__anaerobic-design__simulate_ad_system_tool(
+    use_current_state=True,
+    validate_hrt=True
+)
+```
+
+**Note**: This MCP tool returns a CLI command that must be executed manually due to long execution time (50-150 seconds) and STDIO timeout issues.
+
+#### Option B: Direct CLI Execution (Recommended)
+
+Run the simulation directly via CLI:
 
 ```bash
-python utils/simulate_cli.py \
+/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe utils/simulate_cli.py \
     --basis simulation_basis.json \
     --adm1-state adm1_state.json \
-    --heuristic-config simulation_heuristic_config.json
+    --heuristic-config simulation_heuristic_config.json \
+    --hrt-variation 0.2
 ```
+
+**What the simulation does**:
+1. Loads QSDsan components (~18 seconds)
+2. Creates mADM1 process model with production PCM solver
+3. Builds flowsheet (AnMBR with digester + MBR)
+4. Runs dynamic simulation (~50-150 seconds)
+5. Analyzes results (biogas production, effluent quality, sulfur balance)
+6. Saves results to `simulation_results.json`
+
+**Expected outputs**:
+- Methane production (m³/d, kg/d)
+- Biogas composition (CH₄, CO₂, H₂S percentages)
+- Effluent quality (COD, TSS, VSS, TKN, TP)
+- Sulfur mass balance (influent SO₄ → effluent H₂S)
+- Performance metrics (COD removal %, VSS destruction %)
+- HRT validation results (if `--hrt-variation` specified)
+
+**After simulation completes**:
+
+```bash
+# View results
+cat simulation_results.json | jq '.'
+
+# Or view specific metrics
+cat simulation_results.json | jq '.performance_metrics'
+cat simulation_results.json | jq '.biogas'
+cat simulation_results.json | jq '.sulfur_analysis'
+```
+
+**Why this step is critical**:
+1. Validates that Codex-generated state is physically realistic
+2. Confirms mADM1 process model converges with the state
+3. Verifies biogas production matches theoretical yields
+4. Demonstrates complete end-to-end workflow
+5. Provides actual design outputs (not just heuristics)
+
+**DO NOT skip this step** - the simulation is the ultimate validation that the entire workflow (parameters → Codex ADM1 generation → sizing → simulation) works correctly.
 
 ## Why Step 2 (Codex Generation) is Critical
 
@@ -156,104 +211,6 @@ python utils/simulate_cli.py \
 5. **Production-Ready**: Uses the same process that will be used in production systems
 
 **DO NOT bypass this step by loading pre-existing JSON files** - that defeats the purpose of the workflow test.
-
-## When to Use Each Server
-
-### anaerobic-design Server Tools
-
-Use the main anaerobic-design server for:
-- `elicit_basis_of_design`: Collecting design parameters (flow rate, COD, temperature, etc.)
-- `heuristic_sizing_ad`: Performing heuristic sizing calculations for digesters and MBR systems
-- `get_design_state`: Retrieving the current design state
-- `reset_design`: Clearing the design state for a new project
-- `characterize_feedstock`: Initial tool that may call Codex MCP when `use_codex=true`
-
-### ADM1-State-Variable-Estimator (Codex MCP)
-
-Use the ADM1-State-Variable-Estimator server (`mcp__ADM1-State-Variable-Estimator__codex`) when:
-- The `characterize_feedstock` tool is called with `use_codex=true`
-- You need accurate ADM1 state variable estimation based on feedstock descriptions
-- Converting natural language feedstock descriptions to numerical ADM1 parameters
-
-## How to Call the Codex MCP Server
-
-When the `characterize_feedstock` tool needs Codex assistance:
-
-1. **Prepare the prompt** with feedstock information:
-```python
-prompt = f"""
-Generate ADM1 state variables for the following feedstock:
-{feedstock_description}
-
-Measured parameters:
-- COD: {cod_mg_l} mg/L
-- TSS: {tss_mg_l} mg/L
-- pH: {ph}
-
-[Rest of prompt with JSON structure requirements]
-"""
-```
-
-2. **Call the ADM1-State-Variable-Estimator tool**:
-```python
-result = await mcp_client.call_tool("mcp__ADM1-State-Variable-Estimator__codex", {
-    "prompt": prompt,
-    "cwd": "/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp"
-})
-```
-
-3. **Read the output file**:
-```python
-with open("./adm1_state.json", "r") as f:
-    adm1_state = json.load(f)
-```
-
-## Workflow Example
-
-1. **Start with basis of design**:
-   - Call `elicit_basis_of_design` to set flow rate, COD, temperature
-
-2. **Characterize the feedstock**:
-   - Call `characterize_feedstock` with feedstock description
-   - If `use_codex=true`, this internally uses Codex MCP for intelligent estimation
-   - ADM1 state variables are stored in the design state
-
-3. **Perform heuristic sizing**:
-   - Call `heuristic_sizing_ad` to size digesters and auxiliary equipment
-   - Uses the stored ADM1 state for calculations
-
-4. **Continue to simulation and economic analysis**:
-   - Future tools will use the complete design state
-   - WaterTAP simulation will use ADM1 state variables
-   - Economic analysis will use sizing results
-
-## Important Notes
-
-- The Codex MCP server uses GPT-5 with high reasoning effort
-- Output is written to `./adm1_state.json` in the current directory
-- The `.codex/AGENTS.md` file contains the system prompt for ADM1 expertise
-- Sandbox mode is set to `workspace-write` to allow file creation
-
-## Error Handling
-
-If Codex MCP is unavailable or fails:
-- The `characterize_feedstock` tool falls back to pattern-based estimation
-- Default ADM1 states are generated based on feedstock type keywords
-- A warning is logged indicating the fallback method was used
-
-## Configuration
-
-The Codex MCP server configuration is in:
-- `.mcp.json`: Server launch configuration
-- `.codex/config.toml`: Model and sandbox settings
-- `.codex/AGENTS.md`: System prompt for ADM1 expertise
-
-## Testing
-
-To test Codex integration:
-1. Run `test_milestone3.py` for full workflow testing
-2. Run `test_codex_integration.py` for standalone Codex testing
-3. Check `./adm1_state.json` for output verification
 
 ## Regression Testing - Important Note
 

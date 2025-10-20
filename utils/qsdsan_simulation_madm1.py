@@ -153,9 +153,10 @@ async def run_madm1_simulation(
         cmps = madm1_module.create_madm1_cmps(set_thermo=True)
         logger.info(f"Created {len(cmps)} mADM1 components")
 
-        # 2. Map state to mADM1
-        temp_c = basis.get('Temp', 308.15) - 273.15
-        madm1_state = map_adm1_state_to_madm1(adm1_state, temp_c)
+        # 2. Use ADM1 state directly (Codex already generated 62 mADM1 components)
+        # Do NOT call map_adm1_state_to_madm1() - that's only for converting 30-component states
+        madm1_state = adm1_state
+        logger.info(f"Using Codex-generated mADM1 state with {len(madm1_state)} components")
 
         # 3. Create mADM1 process model using __new__ constructor
         logger.info("Creating ModifiedADM1 process model...")
@@ -177,12 +178,13 @@ async def run_madm1_simulation(
                 conc_dict[comp_id] = madm1_state[comp_id]
             # else: defaults to 0
 
-        # Set concentrations without specifying units - let QSDsan use defaults
-        # Our values are in kg/m3 which is the same as g/L
-        influent.set_flow_by_concentration(
-            flow_tot=Q,
-            concentrations=conc_dict
-        )
+        # CRITICAL: Explicitly specify units to match ADM1 MCP server implementation
+        # Q is in m3/d, concentrations are in kg/m3
+        inf_kwargs = {
+            'concentrations': conc_dict,
+            'units': ('m3/d', 'kg/m3')
+        }
+        influent.set_flow_by_concentration(Q, **inf_kwargs)
 
         logger.info(f"Influent stream created: pH={influent.pH:.2f}")
 
@@ -301,10 +303,12 @@ async def run_madm1_simulation(
                     self._ODE = dy_dt
 
         # Create reactor using custom class
+        # CRITICAL: AnaerobicCSTR expects outs[0] = biogas, outs[1] = effluent
+        # (per Codex review of qsdsan/sanunits/_anaerobic_reactor.py:422-436)
         AD = AnaerobicCSTR_mADM1(
             ID='AD',
             ins=influent,
-            outs=('effluent', 'biogas'),
+            outs=('biogas', 'effluent'),  # FIX: biogas MUST be first
             model=madm1_model,
             V_liq=V_liq,
             V_gas=V_gas,
@@ -313,19 +317,88 @@ async def run_madm1_simulation(
 
         logger.info(f"Reactor created with {len(AD._model._biogas_IDs)} biogas components")
 
-        # 6. Initialize reactor with mADM1 state
-        logger.info("Initializing reactor state...")
-        init_conds = {}
-        for comp_id in cmps.IDs:
-            if comp_id in madm1_state:
-                init_conds[comp_id] = madm1_state[comp_id]
+        # 6. Initialize reactor with seed sludge biomass (NOT influent composition)
+        # Following ADM1 MCP Server pattern: use typical AD steady-state biomass levels
+        # The Codex-generated state represents INFLUENT, not reactor seed sludge
+        logger.info("Initializing reactor with seed sludge biomass...")
 
-        AD.set_init_conc(**init_conds)
-        logger.info("Reactor initialized successfully")
+        # Default seed sludge from ADM1 benchmark (converted to kg/m³ from g/m³)
+        seed_biomass = {
+            'S_su': 0.0124,      # Sugars
+            'S_aa': 0.0055,      # Amino acids
+            'S_fa': 0.1074,      # Long-chain fatty acids
+            'S_va': 0.0123,      # Valerate
+            'S_bu': 0.0140,      # Butyrate
+            'S_pro': 0.0176,     # Propionate
+            'S_ac': 0.0893,      # Acetate
+            'S_h2': 2.5055e-7,   # Hydrogen (very low)
+            'S_ch4': 0.0555,     # Methane
+            'S_IC': 0.0951 * 12.011 / 1000,  # Inorganic carbon (M → kg-C/m³)
+            'S_IN': 0.0945 * 14.007 / 1000,  # Inorganic nitrogen (M → kg-N/m³)
+            'S_I': 0.1309,       # Soluble inerts
+            'X_ch': 0.0205,      # Particulate carbohydrates
+            'X_pr': 0.0842,      # Particulate proteins
+            'X_li': 0.0436,      # Particulate lipids
+            'X_su': 0.3122,      # Sugar degraders (BIOMASS)
+            'X_aa': 0.9317,      # Amino acid degraders (BIOMASS)
+            'X_fa': 0.3384,      # LCFA degraders (BIOMASS)
+            'X_c4': 0.3258,      # Valerate/butyrate degraders (BIOMASS)
+            'X_pro': 0.1011,     # Propionate degraders (BIOMASS)
+            'X_ac': 0.6772,      # Acetoclastic methanogens (BIOMASS) ← KEY!
+            'X_h2': 0.2848,      # Hydrogenotrophic methanogens (BIOMASS) ← KEY!
+            'X_I': 17.2162       # Particulate inerts
+        }
+
+        # Add mADM1-specific components with small seed values
+        seed_biomass.update({
+            'S_IP': 0.001,       # Inorganic phosphorus
+            'X_PAO': 0.01,       # PAO biomass
+            'X_PP': 0.0,         # Polyphosphate
+            'X_PHA': 0.0,        # PHA
+            'S_K': 0.0001,       # Potassium
+            'S_Mg': 0.0001,      # Magnesium
+            'S_Ca': 0.0001,      # Calcium
+            'S_SO4': 0.001,      # Sulfate
+            'S_IS': 0.0001,      # H2S
+            'S_S0': 0.0,         # Elemental sulfur
+            'X_hSRB': 0.01,      # H2-utilizing SRB
+            'X_aSRB': 0.01,      # Acetate-utilizing SRB
+            'X_pSRB': 0.01,      # Propionate-utilizing SRB
+            'X_c4SRB': 0.01,     # Butyrate-utilizing SRB
+            'S_Fe2': 0.0,        # Fe2+
+            'S_Fe3': 0.0,        # Fe3+
+            'S_Al': 0.0,         # Aluminum
+            'X_FeS': 0.0,        # Iron sulfide precipitate
+            'X_Fe3PO42': 0.0,    # Iron phosphate
+            'X_AlPO4': 0.0,      # Aluminum phosphate
+            'X_HFO_H': 0.0,      # HFO high-affinity
+            'X_HFO_L': 0.0,      # HFO low-affinity
+            'X_CCM': 0.0,        # Calcium carbonate
+            'X_ACC': 0.0,        # Amorphous calcium carbonate
+            'X_ACP': 0.0,        # Amorphous calcium phosphate
+            'X_HAP': 0.0,        # Hydroxyapatite
+            'X_DCPD': 0.0,       # Dicalcium phosphate dihydrate
+            'X_OCP': 0.0,        # Octacalcium phosphate
+            'X_struv': 0.0,      # Struvite
+            'X_newb': 0.0,       # Newberyite
+            'X_magn': 0.0,       # Magnesite
+            'X_kstruv': 0.0,     # K-struvite
+            'S_Na': 0.0001,      # Sodium
+            'S_Cl': 0.0001       # Chloride
+        })
+
+        # CRITICAL FIX (per Codex): set_init_conc expects mg/L, not kg/m³
+        # Convert all values: 1 kg/m³ = 1000 mg/L
+        seed_init_mg_L = {k: v * 1e3 for k, v in seed_biomass.items()}
+        AD.set_init_conc(**seed_init_mg_L)
+
+        total_biomass_vss = seed_biomass['X_su'] + seed_biomass['X_aa'] + seed_biomass['X_fa'] + seed_biomass['X_c4'] + seed_biomass['X_pro'] + seed_biomass['X_ac'] + seed_biomass['X_h2']
+        logger.info(f"Reactor initialized with seed biomass (Total biomass VSS: {total_biomass_vss:.1f} kg/m³ = {total_biomass_vss*1000:.0f} mg/L)")
 
         # 7. Create system and simulate
         sys = System('sys', path=(AD,))
-        sys.set_dynamic_tracker(AD.outs[0], AD.outs[1])
+        # Track effluent and biogas (order matches return statement below)
+        sys.set_dynamic_tracker(AD.outs[1], AD.outs[0])  # (effluent, biogas)
 
         logger.info("Running simulation to steady state...")
         sys.simulate(
@@ -337,7 +410,8 @@ async def run_madm1_simulation(
 
         logger.info("Simulation completed successfully!")
 
-        return sys, influent, AD.outs[0], AD.outs[1], 200, 'completed'
+        # Return: (system, influent, effluent, biogas, time, status)
+        return sys, influent, AD.outs[1], AD.outs[0], 200, 'completed'
 
     # Run in thread pool
     result = await anyio.to_thread.run_sync(_run_simulation)

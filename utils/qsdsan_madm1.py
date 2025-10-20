@@ -873,7 +873,72 @@ def rhos_madm1(state_arr, params, T_op, h=None):
     biogas_S[3] = Z_h2s / unit_conversion[30]
     biogas_p = R * T_op * state_arr[63:67]
     rhos[-4:] = kLa * (biogas_S - KH * biogas_p)
-    
+
+    # DIAGNOSTIC HOOKS: Populate root.data for CLI diagnostics (per Codex advice)
+    root = params.get('root')
+    if root is not None:
+        # Calculate Monod factors for diagnostics using Ks from params
+        # Primary substrates (S_su, S_aa, S_fa, S_va, S_bu, S_pro, S_ac, S_h2)
+        primary_substrates = state_arr[[0,1,2,3,4,5,6,7]]
+        Ks_main = Ks[:8]  # First 8 Ks values are for main uptake processes
+        monod_main = substr_inhibit(primary_substrates, Ks_main)
+
+        # Store comprehensive diagnostics
+        root.data = {
+            'pH': float(pH),
+            'nh3_M': float(nh3),
+            'co2_M': float(co2),
+            'h2s_M': float(Z_h2s),
+            'I_pH': {
+                'acidogens': float(Is_pH[0]),
+                'acetoclastic': float(Is_pH[1]),
+                'hydrogenotrophic': float(Is_pH[2]),
+                'SRB_h2': float(Is_pH[3]),
+                'SRB_ac': float(Is_pH[4]),
+                'SRB_aa': float(Is_pH[5]),
+            },
+            'I_h2': {
+                'LCFA': float(Is_h2[0]),
+                'C4_valerate': float(Is_h2[1]),
+                'C4_butyrate': float(Is_h2[2]),
+                'propionate': float(Is_h2[3]),
+            },
+            'I_h2s': {
+                'C4_valerate': float(Is_h2s[0]),
+                'C4_butyrate': float(Is_h2s[1]),
+                'propionate': float(Is_h2s[2]),
+                'acetate': float(Is_h2s[3]),
+                'hydrogen': float(Is_h2s[4]),
+                'SRB_h2': float(Is_h2s[5]),
+                'SRB_ac': float(Is_h2s[6]),
+                'SRB_prop': float(Is_h2s[7]),
+                'SRB_bu': float(Is_h2s[8]),
+                'SRB_va': float(Is_h2s[9]),
+            },
+            'I_nutrients': {
+                'I_IN_lim': float(substr_inhibit(S_IN, KS_IN)),
+                'I_IP_lim': float(substr_inhibit(S_IP, KS_IP)),
+                'combined': float(I_nutrients),
+                'I_nh3': float(Inh3),
+            },
+            'Monod': monod_main.tolist(),
+            'biomass_kg_m3': {
+                'X_su': float(state_arr[16]),
+                'X_aa': float(state_arr[17]),
+                'X_fa': float(state_arr[18]),
+                'X_c4': float(state_arr[19]),
+                'X_pro': float(state_arr[20]),
+                'X_ac': float(state_arr[21]),
+                'X_h2': float(state_arr[22]),
+                'X_PAO': float(state_arr[26]),
+                'X_hSRB': float(state_arr[31]),
+                'X_aSRB': float(state_arr[32]),
+                'X_pSRB': float(state_arr[33]),
+                'X_c4SRB': float(state_arr[34]),
+            },
+            'process_rates': rhos.tolist(),
+        }
+
     return rhos
 
 #%% modified ADM1 class
