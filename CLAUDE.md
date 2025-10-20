@@ -34,6 +34,129 @@ This project provides two MCP servers that work together:
 1. **anaerobic-design**: Main server for anaerobic digester design workflow
 2. **ADM1-State-Variable-Estimator**: Codex-based server for intelligent feedstock characterization
 
+## COMPLETE WORKFLOW - MUST FOLLOW ALL STEPS
+
+**CRITICAL**: When testing the full anaerobic digester design workflow, you MUST follow ALL steps in order. Do NOT skip Step 2 (Codex ADM1 generation) - this is the core innovation of the system.
+
+### Step 0: Reset Design State
+```python
+mcp__anaerobic-design__reset_design()
+```
+
+### Step 1: Collect Basis of Design Parameters
+```python
+mcp__anaerobic-design__elicit_basis_of_design(
+    parameter_group="all",
+    current_values={
+        "Q": 1000,           # m3/d
+        "Temp": 35,          # °C
+        "cod_mg_l": 50000,   # mg/L
+        "tss_mg_l": 35000,   # mg/L
+        "vss_mg_l": 28000,   # mg/L
+        "tkn_mg_l": 2500,    # mg-N/L
+        "tp_mg_l": 500,      # mg-P/L
+        "pH": 7,
+        "alkalinity_meq_l": 50
+    }
+)
+```
+
+### Step 2: Generate ADM1 State Using Codex MCP ⚠️ CRITICAL STEP
+
+**This is the most important step - do NOT skip it!**
+
+Call the Codex MCP server to generate all 62 mADM1 state variables from feedstock description:
+
+```python
+mcp__ADM1-State-Variable-Estimator__codex(
+    prompt=f"""
+Generate complete mADM1 (Modified ADM1) state variables for the following feedstock.
+
+## Feedstock Description
+Type: High-strength municipal wastewater sludge
+Source: Primary and waste activated sludge blend
+Characteristics: Thick, particle-rich suspension
+
+## Measured Bulk Parameters
+- Flow rate: 1000 m³/d
+- COD: 50,000 mg/L
+- TSS: 35,000 mg/L
+- VSS: 28,000 mg/L (VSS/TSS = 0.80)
+- TKN: 2,500 mg-N/L
+- TP: 500 mg-P/L
+- pH: 7.0
+- Alkalinity: 50 meq/L
+- Temperature: 35°C
+
+## Required Output
+
+Generate a complete JSON file with ALL 62 mADM1 state variables (indexes 0-61) as specified in your training.
+
+Save the output to: ./adm1_state.json
+
+Format as:
+{{
+  "S_su": value_in_kg_m3,
+  "S_aa": value_in_kg_m3,
+  ...all 62 components...
+  "S_Cl": value_in_kg_m3
+}}
+
+Ensure the state vector:
+1. Matches the measured bulk parameters (COD, TSS, VSS, TKN, TP)
+2. Represents realistic high-strength sludge composition
+3. Includes all P/S/Fe extension components
+4. Has proper charge balance (cations vs anions)
+""",
+    cwd="/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp"
+)
+```
+
+**After Codex completes**, the ADM1 state will be in `./adm1_state.json`. Load it:
+
+```python
+mcp__anaerobic-design__load_adm1_state(file_path="./adm1_state.json")
+```
+
+### Step 3: Validate ADM1 State
+
+Run validation to ensure Codex-generated state matches targets:
+
+```bash
+python utils/validate_cli.py validate \
+    --adm1-state adm1_state.json \
+    --user-params '{"cod_mg_l": 50000, "tss_mg_l": 35000, "vss_mg_l": 28000, "tkn_mg_l": 2500, "tp_mg_l": 500, "ph": 7}' \
+    --tolerance 0.15
+```
+
+### Step 4: Heuristic Sizing
+
+```python
+mcp__anaerobic-design__heuristic_sizing_ad(
+    use_current_basis=True,
+    target_srt_days=20
+)
+```
+
+### Step 5: Run QSDsan Simulation
+
+```bash
+python utils/simulate_cli.py \
+    --basis simulation_basis.json \
+    --adm1-state adm1_state.json \
+    --heuristic-config simulation_heuristic_config.json
+```
+
+## Why Step 2 (Codex Generation) is Critical
+
+1. **Core Innovation**: The Codex MCP server uses the complete mADM1 specification in `.codex/AGENTS.md` to intelligently generate all 62 state variables
+2. **Intelligent Estimation**: Goes beyond simple heuristics - uses feedstock characteristics to determine realistic distributions
+3. **Complete Component Set**: Generates P/S/Fe extension components that simple tools cannot estimate
+4. **Charge Balance**: Ensures ionic species are properly balanced
+5. **Production-Ready**: Uses the same process that will be used in production systems
+
+**DO NOT bypass this step by loading pre-existing JSON files** - that defeats the purpose of the workflow test.
+
 ## When to Use Each Server
 
 ### anaerobic-design Server Tools
