@@ -190,28 +190,68 @@ If validation fails after 3 attempts, report results to user.
 | #2 JSON format | Low | ⚠️ Deferred | N/A | N/A |
 | #3 Rounding | High | ✅ Fixed | utils/qsdsan_validation_sync.py | 8 |
 | #4 Codex hang | Critical | ✅ Fixed | .codex/AGENTS.md | 20 |
+| #5 fluids patch | High | ✅ Fixed | utils/simulate_cli.py | 7 |
+| #6 X_c missing | Critical | ✅ Fixed | utils/qsdsan_sulfur_kinetics.py | 8 |
+| #7 Component indexing | Critical | ⚠️ Partial | utils/qsdsan_sulfur_kinetics.py | 150+ |
 
-**Total Files Modified**: 2
-**Total Lines Changed**: 33
-**Bugs Blocking Workflow**: 3 of 3 fixed (100%)
+**Total Files Modified**: 5
+**Total Lines Changed**: ~200
+**Bugs Blocking Workflow**: 6 of 7 fixed (86%), 1 partially fixed
 
 ---
 
 ## Commits
 
 1. **e5ad345**: Fix workflow bugs - pH in essential params + ion-balance threshold rounding
-2. **[pending]**: Fix Codex agent hang - prevent stderr suppression and add retry limits
+2. **5749a7e**: Fix mADM1 validation tools based on Codex technical review
+3. **[pending]**: Fix BUG #5, #6, #7 - mADM1 simulation compatibility fixes
+
+---
+
+## Workflow Testing Results (2025-10-21)
+
+### End-to-End Test Status: 5/6 Steps Passing
+
+1. ✅ Reset design state
+2. ✅ Elicit basis of design (BUG #1 verified fixed)
+3. ✅ Generate ADM1 state with Codex (BUG #4 verified fixed)
+4. ✅ Load and validate ADM1 state
+5. ✅ Heuristic sizing
+6. ❌ mADM1 simulation (BUG #5, #6, #7 discovered)
+
+### New Bugs Found and Fixed
+
+**BUG #5**: Missing fluids.numerics.PY37 patch in simulate_cli.py
+- Status: ✅ FIXED
+- Impact: Simulation crashed on QSDsan import
+- Fix: Added monkey-patch identical to qsdsan_validation_sync.py
+
+**BUG #6**: mADM1 Component Set Missing X_c
+- Status: ✅ FIXED
+- Impact: ADM1 process initialization failed
+- Fix: Replaced ADM1() with ModifiedADM1() (Codex-recommended approach)
+- Architecture: Matches QSDsan-endorsed pattern (ADM1_p_extension)
+
+**BUG #7**: Component Indexing and Process Creation Issues (Cascade)
+- Status: ⚠️ 4 of 5 sub-issues fixed
+- Part 1 (S_IS KeyError): ✅ FIXED - Added dynamic component resolution
+- Part 2 (UndefinedComponent): ✅ FIXED - Added exception handling
+- Part 3 (Processes attribute): ✅ FIXED - Changed to tuple return
+- Part 4 (Duplicate process IDs): ⚠️ UNDER INVESTIGATION
+- Part 5 (unknown): Not yet revealed
 
 ---
 
 ## Next Steps
 
-1. ✅ Commit AGENTS.md fixes
-2. 🔄 Test complete workflow end-to-end:
-   - Reset design state
-   - Elicit basis of design (verify pH stored)
-   - Call Codex to generate ADM1 state (verify no hang)
-   - Load and validate state
-   - Run heuristic sizing
-   - Execute simulation
-3. 📝 Document workflow in README if successful
+1. **IMMEDIATE**: Fix BUG #7 part 4 (duplicate process ID issue)
+   - X_hSRB appears twice in biomass_IDs tuple
+   - Investigate process combination logic
+
+2. **VERIFY**: Complete workflow testing
+   - Target: 6/6 steps passing
+   - Validate biogas production, COD removal, sulfur metrics
+
+3. **COMMIT**: All simulation compatibility fixes
+
+4. **DOCUMENT**: Update README with workflow documentation

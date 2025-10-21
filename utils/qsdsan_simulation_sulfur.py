@@ -1,17 +1,20 @@
 """
-QSDsan simulation module for ADM1+sulfur model (30 components, H2S inhibition).
+QSDsan simulation module for mADM1 (Modified ADM1) with 62 state variables.
 
 This module provides simulation functions for anaerobic digester design using
-a custom ADM1 extension with sulfate reduction and H2S inhibition.
+QSDsan's ModifiedADM1 process model with complete sulfur/phosphorus/iron extensions.
 
 Key features:
-- 30-component system (27 ADM1 + S_SO4, S_IS, X_SRB)
-- H2S inhibition on methanogens
+- 62-component mADM1 system (full Flores-Alsina model)
+- Built-in SRB processes (X_hSRB, X_aSRB, X_pSRB, X_c4SRB)
+- Built-in H2S inhibition on methanogens
+- EBPR extension (PAO, polyphosphate)
+- Metal/mineral precipitation (Fe, Al, Ca, Mg)
 - Proper dynamic simulation setup with set_dynamic_tracker
 - Early-stop convergence checking for pseudo-steady-state
 - Dual-HRT validation for design robustness
 
-Based on patterns from adm1_mcp_server/simulation.py but extended for sulfur.
+Based on QSDsan's published mADM1 implementation (utils/qsdsan_madm1.py).
 """
 
 import numpy as np
@@ -19,9 +22,9 @@ from qsdsan import sanunits as su, WasteStream, System
 from qsdsan.utils import ospath
 import logging
 
-# Import our custom ADM1+sulfur extension
-from utils.qsdsan_sulfur_kinetics import extend_adm1_with_sulfate_and_inhibition
-# Note: ADM1_SULFUR_CMPS imported locally where needed to avoid capturing None at module load time
+# ROOT CAUSE FIX: Use ModifiedADM1 directly instead of extend_adm1_with_sulfate_and_inhibition
+# ModifiedADM1 already contains complete sulfur biology (SRB processes, H2S inhibition, etc.)
+from utils.qsdsan_madm1 import ModifiedADM1, create_madm1_cmps
 
 # Import pH calculation if available
 try:
@@ -48,9 +51,9 @@ N_mw = get_mw({'N': 1})
 logger = logging.getLogger(__name__)
 
 
-def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
+def create_influent_stream_sulfur(Q, Temp, adm1_state_62):
     """
-    Create influent WasteStream with 30 ADM1+sulfur components.
+    Create influent WasteStream with 62 mADM1 components.
 
     Parameters
     ----------
@@ -58,9 +61,9 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
         Flow rate in m3/d
     Temp : float
         Temperature in K
-    adm1_state_30 : dict
-        Dictionary of 30-component concentrations (kg/m3)
-        Must include: 27 standard ADM1 + S_SO4, S_IS, X_SRB
+    adm1_state_62 : dict
+        Dictionary of 62-component concentrations (kg/m3)
+        Full mADM1 component set from Codex agent
 
     Returns
     -------
@@ -69,16 +72,14 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
 
     Notes
     -----
-    - Uses ADM1_SULFUR_CMPS (30 components)
+    - Uses create_madm1_cmps() for component set (62 components + H2O)
     - Concentrations expected in kg/m3 (or kg COD/m3 for COD-measured components)
     - pH and alkalinity calculated based on acid-base equilibria
+    - Codex agent generates disaggregated SRB biomass (X_hSRB, X_aSRB, X_pSRB, X_c4SRB)
     """
     try:
-        # Import components here to ensure they're loaded
-        from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS
-
-        if ADM1_SULFUR_CMPS is None:
-            raise RuntimeError("ADM1_SULFUR_CMPS not initialized. Call get_qsdsan_components() first.")
+        # Use mADM1 components (62 + H2O = 63 total)
+        madm1_cmps = create_madm1_cmps()
 
         inf = WasteStream('Influent', T=Temp)
 
@@ -111,11 +112,11 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
         def _kmol_to_kg_per_m3(comp_id, kmol_per_m3):
             # Convert kmol/m3 to kg/m3 using component MW (g/mol)
             # kg/m3 = kmol/m3 * (g/mol) [MW] (see cancellation of 1e3 factors)
-            MW_g_per_mol = ADM1_SULFUR_CMPS[comp_id].chem_MW
+            MW_g_per_mol = madm1_cmps[comp_id].chem_MW
             return kmol_per_m3 * MW_g_per_mol
 
-        # Standard ADM1 components (27). Skip bulk liquid 'H2O' to avoid warnings.
-        for comp_id in ADM1_SULFUR_CMPS.IDs[:27]:
+        # Process all mADM1 components (62). Skip bulk liquid 'H2O' to avoid warnings.
+        for comp_id in madm1_cmps.IDs:
             if comp_id == 'H2O':
                 continue
             if comp_id in adm1_state_30:
@@ -134,26 +135,8 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_30):
                     num = _to_number(raw)
                     concentrations[comp_id] = num if num is not None else 1e-6
             else:
-                # Use small default if not specified
+                # Use small default if not specified (Codex generates all 62 components)
                 concentrations[comp_id] = 1e-6
-
-        # Sulfur components (3)
-        for comp_id, default_val in (
-            ('S_SO4', 0.1),   # 100 mg S/L default
-            ('S_IS', 0.001),  # Low initial sulfide
-            ('X_SRB', 0.01),  # Seed population
-        ):
-            raw = adm1_state_30.get(comp_id, default_val)
-            if isinstance(raw, (list, tuple)) and len(raw) >= 2 and isinstance(raw[1], str):
-                num = _to_number(raw)
-                unit = raw[1].strip().lower()
-                if unit == 'kmol/m3':
-                    concentrations[comp_id] = _kmol_to_kg_per_m3(comp_id, num)
-                else:
-                    concentrations[comp_id] = float(num)
-            else:
-                num = _to_number(raw)
-                concentrations[comp_id] = num if num is not None else float(default_val)
 
         # Set flow by concentration
         inf.set_flow_by_concentration(
@@ -459,21 +442,23 @@ def run_simulation_sulfur(basis, adm1_state_30, HRT, simulation_time=200):
         Q = basis['Q']
         Temp = basis.get('Temp', 308.15)  # Default 35°C
 
-        logger.info(f"=== Starting ADM1+Sulfur Simulation ===")
+        logger.info(f"=== Starting mADM1 Simulation ===")
         logger.info(f"Q={Q} m3/d, T={Temp} K, HRT={HRT} days")
 
-        # 1. Create extended ADM1+sulfur model
-        logger.info("Creating ADM1+sulfur model (30 components, H2S inhibition)")
-        adm1_sulfur = extend_adm1_with_sulfate_and_inhibition()
-        logger.info(f"Model created with {len(adm1_sulfur)} processes")
+        # 1. Create mADM1 model (use ModifiedADM1 directly - no extend function needed)
+        # ModifiedADM1 already has SRB processes, H2S inhibition, and all 62 mADM1 components
+        logger.info("Creating mADM1 model (62 components, built-in sulfur biology)")
+        madm1_cmps = create_madm1_cmps()
+        madm1_model = ModifiedADM1(components=madm1_cmps)
+        logger.info(f"mADM1 model created with {len(madm1_model)} processes")
 
-        # 2. Create streams with 30 components
-        logger.info("Creating influent stream")
+        # 2. Create streams with 62 mADM1 components (adm1_state_30 actually has 62 components from Codex)
+        logger.info("Creating influent stream with mADM1 state")
         inf = create_influent_stream_sulfur(Q, Temp, adm1_state_30)
         eff = WasteStream('Effluent', T=Temp)
         gas = WasteStream('Biogas')
 
-        # 3. Create AnaerobicCSTR
+        # 3. Create AnaerobicCSTR with mADM1 model
         V_liq = Q * HRT
         V_gas = V_liq * 0.1  # 10% of liquid volume
 
@@ -482,17 +467,17 @@ def run_simulation_sulfur(basis, adm1_state_30, HRT, simulation_time=200):
             'AD',
             ins=inf,
             outs=(gas, eff),
-            model=adm1_sulfur,
+            model=madm1_model,
             V_liq=V_liq,
             V_gas=V_gas,
             T=Temp
         )
 
-        # 4. Initialize reactor with validated 30-component state
-        logger.info("Initializing reactor with 30-component state")
+        # 4. Initialize reactor with validated mADM1 state (62 components)
+        logger.info("Initializing reactor with mADM1 state")
         init_conds = initialize_30_component_state(adm1_state_30)
         AD.set_init_conc(**init_conds)
-        logger.info(f"Initial S_SO4={init_conds['S_SO4']:.4f}, S_IS={init_conds['S_IS']:.6f}, X_SRB={init_conds['X_SRB']:.4f}")
+        logger.info(f"Initial S_SO4={init_conds['S_SO4']:.4f}, S_IS={init_conds['S_IS']:.6f}, X_hSRB={init_conds.get('X_hSRB', 0):.4f}")
 
         # 5. Set up dynamic system
         # CRITICAL FIX: Use None for ID to get unique auto-generated ID

@@ -6,6 +6,14 @@ This script handles the heavy QSDsan operations outside the MCP server
 to avoid STDIO connection timeouts during the 18-second component loading.
 """
 
+# CRITICAL FIX: Patch fluids.numerics BEFORE any QSDsan imports
+# thermo package (dependency of thermosteam → biosteam → qsdsan) expects
+# numerics.PY37 which was removed in fluids 1.2.0
+# Since we're on Python 3.12, PY37 should always be True
+import fluids.numerics
+if not hasattr(fluids.numerics, 'PY37'):
+    fluids.numerics.PY37 = True  # Python 3.12 > 3.7
+
 import sys
 import json
 import argparse

@@ -16,8 +16,35 @@ import logging
 import numpy as np
 from qsdsan import Process, Processes, CompiledProcesses
 from qsdsan.processes._adm1 import substr_inhibit, non_compet_inhibit, ADM1
+# BUG #6 FIX: Import ModifiedADM1 to avoid X_c requirement
+# QSDsan's ADM1 expects X_c, but mADM1 uses X_ch/X_pr/X_li directly
+from utils.qsdsan_madm1 import ModifiedADM1
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_component_index(cmps, comp_id):
+    """Return component index, raise a helpful error if missing."""
+    # QSDsan raises UndefinedComponent (not ValueError) when component not found
+    from qsdsan._components import UndefinedComponent
+
+    try:
+        return cmps.index(comp_id)
+    except (ValueError, AttributeError, UndefinedComponent) as err:
+        raise KeyError(f"Component '{comp_id}' not found in ADM1_SULFUR_CMPS") from err
+
+
+def _resolve_srb_component(cmps):
+    """Resolve the SRB biomass component in the current component set."""
+    # QSDsan raises UndefinedComponent (not ValueError) when component not found
+    from qsdsan._components import UndefinedComponent
+
+    for candidate in ('X_SRB', 'X_hSRB'):
+        try:
+            return candidate, cmps.index(candidate)
+        except (ValueError, AttributeError, UndefinedComponent):
+            continue
+    raise KeyError("No SRB biomass component (X_SRB or X_hSRB) found in ADM1_SULFUR_CMPS")
 
 # ============================================================================
 # ADM1_Sulfur - Custom CompiledProcesses subclass with H2S biogas tracking
@@ -100,18 +127,22 @@ def create_sulfate_reduction_processes():
         raise RuntimeError("Components not initialized. Call get_qsdsan_components() first.")
 
     params = SRB_PARAMETERS
-    i_mass_IS = SULFUR_COMPONENT_INFO['S_IS']['i_mass']
+    cmps = ADM1_SULFUR_CMPS
+    srb_biomass_id, idx_SRB = _resolve_srb_component(cmps)
+    i_mass_IS = getattr(cmps, 'S_IS').i_mass
 
     # Get dynamic component indices from the extended component set
     # CRITICAL: Do not hardcode positions - use dynamic lookup
-    idx_h2 = ADM1_SULFUR_CMPS.index('S_h2')
-    idx_ac = ADM1_SULFUR_CMPS.index('S_ac')
-    idx_SO4 = SULFUR_COMPONENT_INFO['S_SO4']['index']
-    idx_IS = SULFUR_COMPONENT_INFO['S_IS']['index']
-    idx_SRB = SULFUR_COMPONENT_INFO['X_SRB']['index']
+    idx_h2 = _resolve_component_index(cmps, 'S_h2')
+    idx_ac = _resolve_component_index(cmps, 'S_ac')
+    idx_SO4 = _resolve_component_index(cmps, 'S_SO4')
+    idx_IS = _resolve_component_index(cmps, 'S_IS')
 
     logger.info("Creating sulfate reduction processes")
-    logger.debug(f"Component indices: H2={idx_h2}, Ac={idx_ac}, SO4={idx_SO4}, IS={idx_IS}, SRB={idx_SRB}")
+    logger.debug(
+        "Component indices: H2=%s, Ac=%s, SO4=%s, IS=%s, SRB=%s (%s)",
+        idx_h2, idx_ac, idx_SO4, idx_IS, idx_SRB, srb_biomass_id
+    )
 
     # ========================================================================
     # PROCESS 1: H2-utilizing sulfate reduction with H2S inhibition
@@ -152,9 +183,9 @@ def create_sulfate_reduction_processes():
             'S_h2': -1.0,                                    # H2 consumption
             'S_SO4': -(1 - params['Y_hSRB']) * i_mass_IS,   # SO4 reduction
             'S_IS': (1 - params['Y_hSRB']),                 # Sulfide production
-            'X_SRB': params['Y_hSRB'],                      # Biomass growth
+            srb_biomass_id: params['Y_hSRB'],                      # Biomass growth
         },
-        ref_component='X_SRB',
+        ref_component=srb_biomass_id,
         conserved_for=('COD',),  # Don't specify S - components lack i_S attribute
         parameters=('k_hSRB', 'K_hSRB', 'K_so4_hSRB', 'KI_h2s_hSRB')
     )
@@ -204,9 +235,9 @@ def create_sulfate_reduction_processes():
             'S_SO4': -(1 - params['Y_aSRB']) * i_mass_IS,  # SO4 reduction
             'S_IS': (1 - params['Y_aSRB']),                 # Sulfide production
             'S_IC': 0.5,                                     # Inorganic carbon production
-            'X_SRB': params['Y_aSRB'],                      # Biomass growth
+            srb_biomass_id: params['Y_aSRB'],                      # Biomass growth
         },
-        ref_component='X_SRB',
+        ref_component=srb_biomass_id,
         conserved_for=('COD',),  # Don't specify S - components lack i_S attribute
         parameters=('k_aSRB', 'K_aSRB', 'K_so4_hSRB', 'KI_h2s_aSRB')
     )
@@ -239,11 +270,11 @@ def create_sulfate_reduction_processes():
     decay_SRB = Process(
         'decay_SRB',
         reaction={
-            'X_SRB': -1.0,
-            'X_c': 1.0 - params['f_sI_xb'],  # To composites
+            srb_biomass_id: -1.0,
+            'X_I': 1.0 - params['f_sI_xb'],  # To particulate inerts
             'S_I': params['f_sI_xb']         # To soluble inerts
         },
-        ref_component='X_SRB',
+        ref_component=srb_biomass_id,
         conserved_for=('COD',),
         parameters=('k_dec_SRB',)
     )
@@ -257,9 +288,10 @@ def create_sulfate_reduction_processes():
     logger.debug("Created decay_SRB process with dynamic indexing")
 
     processes = Processes([growth_SRB_h2, growth_SRB_ac, decay_SRB])
-    logger.info(f"Created {len(processes)} sulfate reduction processes")
+    logger.info(f"Created {len(processes)} sulfate reduction processes using {srb_biomass_id}")
 
-    return processes
+    # Return both processes and the SRB biomass ID for downstream use
+    return processes, srb_biomass_id
 
 
 def extend_adm1_with_sulfate(base_adm1=None):
@@ -281,14 +313,14 @@ def extend_adm1_with_sulfate(base_adm1=None):
     logger.info("Extending ADM1 with sulfate reduction")
 
     if base_adm1 is None:
-        # Create base ADM1 with extended 30-component set
-        logger.debug("Creating new ADM1 process with 30-component set")
-        base_adm1 = ADM1(components=ADM1_SULFUR_CMPS)
+        # BUG #6 FIX: Create ModifiedADM1 with 63-component mADM1 set
+        logger.debug("Creating new ModifiedADM1 process with 63-component mADM1 set")
+        base_adm1 = ModifiedADM1(components=ADM1_SULFUR_CMPS)
 
     logger.debug(f"Base ADM1 has {len(base_adm1)} processes")
 
-    # Create SRB processes
-    sulfate_processes = create_sulfate_reduction_processes()
+    # Create SRB processes - now returns tuple (processes, srb_biomass_id)
+    sulfate_processes, srb_biomass_id = create_sulfate_reduction_processes()
 
     # Extract processes from compiled ADM1 (it's read-only, so we need to get the tuple)
     # ADM1 returns a CompiledProcesses object, which has a .tuple attribute
@@ -328,13 +360,13 @@ def create_rate_function_with_h2s_inhibition(srb_rate_functions, base_cmps, base
         Custom rate function for use with set_rate_function()
     """
     # Import component info here to avoid module-level dependency
-    from utils.extract_qsdsan_sulfur_components import SULFUR_COMPONENT_INFO
+    from utils.extract_qsdsan_sulfur_components import ADM1_SULFUR_CMPS
 
-    if SULFUR_COMPONENT_INFO is None:
-        raise RuntimeError("SULFUR_COMPONENT_INFO not initialized. Call get_qsdsan_components() first.")
+    if ADM1_SULFUR_CMPS is None:
+        raise RuntimeError("ADM1_SULFUR_CMPS not initialized. Call get_qsdsan_components() first.")
 
     # Get component index for S_IS
-    idx_IS = SULFUR_COMPONENT_INFO['S_IS']['index']
+    idx_IS = _resolve_component_index(ADM1_SULFUR_CMPS, 'S_IS')
 
     # Methanogen process indices in ADM1 (from inspection)
     IDX_UPTAKE_ACETATE = 10  # Acetoclastic methanogen
@@ -454,9 +486,10 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     base_unit_conv = base_i_mass / base_chem_MW
     logger.debug(f"Pre-calculated unit conversion for {len(base_unit_conv)} base ADM1 components")
 
-    # Get base ADM1 parameters (will use 30-component set initially)
+    # BUG #6 FIX: Use ModifiedADM1 instead of ADM1 to avoid X_c requirement
+    # ModifiedADM1 supports the full 63-component mADM1 set with X_ch/X_pr/X_li
     if base_adm1 is None:
-        temp_adm1 = ADM1(components=ADM1_SULFUR_CMPS)
+        temp_adm1 = ModifiedADM1(components=ADM1_SULFUR_CMPS)
     else:
         temp_adm1 = base_adm1
     base_params = temp_adm1.rate_function.params.copy()
@@ -470,24 +503,62 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
     logger.debug(f"Captured base ADM1 parameters with {len(base_cmps)} components")
 
     if base_adm1 is None:
-        # Create ADM1 with extended 30-component set for the full model
-        logger.debug("Creating new ADM1 process with 30-component set")
-        base_adm1 = ADM1(components=ADM1_SULFUR_CMPS)
+        # BUG #6 FIX: Create ModifiedADM1 with 63-component mADM1 set
+        logger.debug("Creating new ModifiedADM1 process with 63-component mADM1 set")
+        base_adm1 = ModifiedADM1(components=ADM1_SULFUR_CMPS)
 
     # Create SRB processes with their rate functions
-    sulfate_processes = create_sulfate_reduction_processes()
+    # Returns tuple: (processes, srb_biomass_id)
+    sulfate_processes, srb_biomass_id = create_sulfate_reduction_processes()
 
-    # Extract SRB rate functions for custom wrapper
-    # These were created in create_sulfate_reduction_processes() with closures
-    # Need to access by ID, not index
-    rate_SRB_h2_func = sulfate_processes['growth_SRB_h2'].rate_function
-    rate_SRB_ac_func = sulfate_processes['growth_SRB_ac'].rate_function
-    rate_SRB_decay_func = sulfate_processes['decay_SRB'].rate_function
+    # BUG #7 FIX (Part 4): Check if ModifiedADM1 already contains SRB processes
+    # ModifiedADM1 ships with sulfur biology (growth_SRB_h2, X_hSRB, etc.)
+    # Only add our custom SRB processes if they're not already present
+    existing_process_ids = {p.ID for p in base_adm1.tuple}
+    logger.debug(f"Existing process IDs in base_adm1: {existing_process_ids}")
+
+    # Filter out SRB processes that already exist
+    srb_process_list = [p for p in sulfate_processes if p.ID not in existing_process_ids]
+
+    if len(srb_process_list) < len(sulfate_processes):
+        logger.info(f"ModifiedADM1 already contains {len(sulfate_processes) - len(srb_process_list)} SRB processes")
+        logger.info(f"Skipping duplicate SRB processes to avoid ID conflicts")
+        # If all SRB processes already exist, use base_adm1 as-is
+        if len(srb_process_list) == 0:
+            logger.info("All SRB processes already in base model - using ModifiedADM1 SRB kinetics")
+            processes = base_adm1
+            # Don't need custom rate functions if using built-in SRB kinetics
+            rate_SRB_h2_func = None
+            rate_SRB_ac_func = None
+            rate_SRB_decay_func = None
+        else:
+            # Extract rate functions only for processes we're adding
+            rate_SRB_h2_func = sulfate_processes['growth_SRB_h2'].rate_function if 'growth_SRB_h2' not in existing_process_ids else None
+            rate_SRB_ac_func = sulfate_processes['growth_SRB_ac'].rate_function if 'growth_SRB_ac' not in existing_process_ids else None
+            rate_SRB_decay_func = sulfate_processes['decay_SRB'].rate_function if 'decay_SRB' not in existing_process_ids else None
+    else:
+        # Extract SRB rate functions for custom wrapper
+        # These were created in create_sulfate_reduction_processes() with closures
+        # Need to access by ID, not index
+        rate_SRB_h2_func = sulfate_processes['growth_SRB_h2'].rate_function
+        rate_SRB_ac_func = sulfate_processes['growth_SRB_ac'].rate_function
+        rate_SRB_decay_func = sulfate_processes['decay_SRB'].rate_function
 
     # Per mADM1 reference (qsdsan_madm1.py:618): Set class attributes BEFORE compilation
-    # Extend biogas tracking to include H2S (S_IS component)
-    ADM1_Sulfur._biogas_IDs = (*base_adm1._biogas_IDs, 'S_IS')
-    ADM1_Sulfur._biomass_IDs = (*base_adm1._biomass_IDs, 'X_SRB')
+    # Extend biogas tracking to include H2S (S_IS component) - only if not already present
+    if 'S_IS' not in base_adm1._biogas_IDs:
+        ADM1_Sulfur._biogas_IDs = (*base_adm1._biogas_IDs, 'S_IS')
+    else:
+        ADM1_Sulfur._biogas_IDs = base_adm1._biogas_IDs
+
+    # BUG #7 FIX (Part 4): Only append srb_biomass_id if not already present
+    if srb_biomass_id not in base_adm1._biomass_IDs:
+        ADM1_Sulfur._biomass_IDs = (*base_adm1._biomass_IDs, srb_biomass_id)
+        logger.debug(f"Appended {srb_biomass_id} to biomass IDs")
+    else:
+        ADM1_Sulfur._biomass_IDs = base_adm1._biomass_IDs
+        logger.debug(f"{srb_biomass_id} already in biomass IDs - using existing")
+
     ADM1_Sulfur._acid_base_pairs = base_adm1._acid_base_pairs
     ADM1_Sulfur._stoichio_params = (*base_adm1._stoichio_params,)
     # Kinetic params: inherit ALL from ADM1 (including 'root') + add 'KIs_h2s'
@@ -502,29 +573,45 @@ def extend_adm1_with_sulfate_and_inhibition(base_adm1=None):
 
     # Combine ADM1 + SRB processes (create Processes object without compiling yet)
     # Per mADM1 reference (qsdsan_madm1.py:668-728): Modify BEFORE calling compile()
-    adm1_process_list = list(base_adm1.tuple)
-    srb_process_list = list(sulfate_processes)
-    processes = Processes(adm1_process_list + srb_process_list)
+    # BUG #7 FIX (Part 4): Only add non-duplicate SRB processes
+    if len(srb_process_list) == 0:
+        # All SRB processes already exist - use base_adm1 as-is
+        processes = base_adm1
+        logger.info("Using base ModifiedADM1 processes (no new SRB processes to add)")
+        # No need to compile - already compiled
+        compile_needed = False
+    else:
+        adm1_process_list = list(base_adm1.tuple)
+        processes = Processes(adm1_process_list + srb_process_list)
+        logger.info(f"Combined {len(adm1_process_list)} ADM1 + {len(srb_process_list)} new SRB processes")
+        compile_needed = True
 
-    # Now compile to ADM1_Sulfur class
+    # Now compile to ADM1_Sulfur class (only if we created a new Processes object)
     # Per mADM1 reference: Use Processes.compile(to_class=cls) pattern
-    processes.compile(to_class=ADM1_Sulfur)
+    if compile_needed:
+        processes.compile(to_class=ADM1_Sulfur)
+        logger.debug(f"Compiled to {type(processes).__name__}")
+    else:
+        logger.debug(f"Using pre-compiled {type(processes).__name__}")
 
-    logger.info(f"Combined {len(adm1_process_list)} ADM1 + {len(srb_process_list)} SRB processes")
-    logger.debug(f"Compiled to {type(processes).__name__}")
     logger.debug(f"Processes object _biogas_IDs: {processes._biogas_IDs}")
 
-    # Create custom rate function with H2S inhibition
+    # Create custom rate function with H2S inhibition (only if we have custom SRB processes)
     # Pass the captured base ADM1 components and parameters for _rhos_adm1 calls
-    custom_rate_func = create_rate_function_with_h2s_inhibition(
-        srb_rate_functions=(rate_SRB_h2_func, rate_SRB_ac_func, rate_SRB_decay_func),
-        base_cmps=base_cmps,
-        base_params=base_params,
-        base_unit_conv=base_unit_conv
-    )
+    # BUG #7 FIX (Part 4): Skip custom rate function if using built-in SRB kinetics
+    if rate_SRB_h2_func is not None:
+        custom_rate_func = create_rate_function_with_h2s_inhibition(
+            srb_rate_functions=(rate_SRB_h2_func, rate_SRB_ac_func, rate_SRB_decay_func),
+            base_cmps=base_cmps,
+            base_params=base_params,
+            base_unit_conv=base_unit_conv
+        )
 
-    # Set the custom rate function on the compiled process
-    processes.set_rate_function(custom_rate_func)
+        # Set the custom rate function on the compiled process
+        processes.set_rate_function(custom_rate_func)
+        logger.info("Applied custom rate function with H2S inhibition")
+    else:
+        logger.info("Using ModifiedADM1 built-in SRB kinetics (no custom rate function)")
 
     # Per mADM1 reference (qsdsan_madm1.py:776-786): Set parameters using the proper pattern
     # 1. Extract stoichiometric parameter values from base_params
@@ -640,8 +727,8 @@ if __name__ == "__main__":
     # 1. Create processes
     print("1. Creating sulfate reduction processes:")
     try:
-        processes = create_sulfate_reduction_processes()
-        print(f"   [OK] Created {len(processes)} processes")
+        processes, srb_id = create_sulfate_reduction_processes()
+        print(f"   [OK] Created {len(processes)} processes using {srb_id}")
         for p in processes:
             print(f"      - {p.ID}")
     except Exception as e:
