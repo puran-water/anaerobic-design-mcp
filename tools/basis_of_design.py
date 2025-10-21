@@ -43,7 +43,9 @@ async def elicit_basis_of_design(
             "essential": [
                 ("feed_flow_m3d", "Feed flow rate (m³/day)", 1000.0),
                 ("cod_mg_l", "COD concentration (mg/L)", 50000.0),
-                ("temperature_c", "Operating temperature (°C)", 35.0)
+                ("temperature_c", "Operating temperature (°C)", 35.0),
+                ("ph", "pH", 7.0),
+                ("alkalinity_meq_l", "Alkalinity (meq/L)", 100.0)
             ],
             "solids": [
                 ("tss_mg_l", "TSS concentration (mg/L)", 35000.0),

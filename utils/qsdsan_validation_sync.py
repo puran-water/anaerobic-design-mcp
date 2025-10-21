@@ -210,21 +210,23 @@ def check_charge_balance_sync(adm1_state: Dict[str, Any], target_ph: float, temp
     balance_at_eq = check_charge_balance_sync_lightweight(adm1_state, equilibrium_ph, temperature_k)
 
     # Calculate deviation from target
-    ph_deviation = abs(equilibrium_ph - target_ph)
-    balanced = ph_deviation <= 0.5  # ±0.5 pH units tolerance
+    # IMPORTANT: Round values first, then apply threshold check
+    # This prevents false failures due to brentq solver tolerance (xtol=0.01)
+    ph_deviation_rounded = round(abs(equilibrium_ph - target_ph), 2)
+    balanced = ph_deviation_rounded <= 0.5  # ±0.5 pH units tolerance
 
     if balanced:
         message = f"Charge balance OK - equilibrium pH {equilibrium_ph:.2f} matches target {target_ph:.2f}"
     else:
         message = (
             f"Equilibrium pH ({equilibrium_ph:.2f}) differs from target ({target_ph:.2f}) "
-            f"by {ph_deviation:.2f} units. Add cations to raise pH or add anions to lower pH."
+            f"by {ph_deviation_rounded:.2f} units. Add cations to raise pH or add anions to lower pH."
         )
 
     return {
         "equilibrium_ph": round(equilibrium_ph, 2),
         "target_ph": round(target_ph, 2),
-        "ph_deviation": round(ph_deviation, 2),
+        "ph_deviation": ph_deviation_rounded,
         "cation_meq_l": balance_at_eq['cation_meq_l'],
         "anion_meq_l": balance_at_eq['anion_meq_l'],
         "residual_meq_l": balance_at_eq['residual_meq_l'],

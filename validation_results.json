@@ -1,0 +1,64 @@
+{
+  "bulk_validation": {
+    "valid": false,
+    "calculated_parameters": {
+      "cod_mg_l": 4280.000999999999,
+      "tss_mg_l": 3577.9529518835725,
+      "vss_mg_l": 562.1770236028439,
+      "tkn_mg_l": 83.0441,
+      "tp_mg_l": 8.199399999999999
+    },
+    "deviations": {
+      "cod_mg_l": {
+        "calculated": 4280.0,
+        "target": 50000.0,
+        "deviation_percent": 91.44
+      },
+      "tss_mg_l": {
+        "calculated": 3577.95,
+        "target": 35000.0,
+        "deviation_percent": 89.78
+      },
+      "vss_mg_l": {
+        "calculated": 562.18,
+        "target": 28000.0,
+        "deviation_percent": 97.99
+      },
+      "tkn_mg_l": {
+        "calculated": 83.04,
+        "target": 2500.0,
+        "deviation_percent": 96.68
+      },
+      "tp_mg_l": {
+        "calculated": 8.2,
+        "target": 500.0,
+        "deviation_percent": 98.36
+      }
+    },
+    "pass_fail": {
+      "cod_mg_l": "FAIL",
+      "tss_mg_l": "FAIL",
+      "vss_mg_l": "FAIL",
+      "tkn_mg_l": "FAIL",
+      "tp_mg_l": "FAIL"
+    },
+    "warnings": [
+      "COD_MG_L: 4280.0 mg/L (target: 50000.0 mg/L, deviation: 91.4%)",
+      "TSS_MG_L: 3578.0 mg/L (target: 35000.0 mg/L, deviation: 89.8%)",
+      "VSS_MG_L: 562.2 mg/L (target: 28000.0 mg/L, deviation: 98.0%)",
+      "TKN_MG_L: 83.0 mg/L (target: 2500.0 mg/L, deviation: 96.7%)",
+      "TP_MG_L: 8.2 mg/L (target: 500.0 mg/L, deviation: 98.4%)"
+    ]
+  },
+  "ion_balance": {
+    "equilibrium_ph": 4.36,
+    "target_ph": 7.0,
+    "ph_deviation": 2.64,
+    "cation_meq_l": 1.0,
+    "anion_meq_l": 0.9995,
+    "residual_meq_l": 0.0005,
+    "balanced": false,
+    "message": "Equilibrium pH (4.36) differs from target (7.00) by 2.64 units. Add cations to raise pH or add anions to lower pH."
+  },
+  "all_valid": false
+}
