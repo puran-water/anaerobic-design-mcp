@@ -63,13 +63,33 @@ def compute_bulk_composites_sync(adm1_state: dict, temperature_k: float) -> dict
     return result
 
 
-def check_ion_balance_sync(adm1_state: dict, ph: float, temperature_k: float) -> dict:
-    """Synchronous wrapper for check_charge_balance_qsdsan."""
-    logger.info("Loading QSDsan components...")
+def check_ion_balance_sync(adm1_state: dict, target_ph: float, max_ph_deviation: float, temperature_k: float) -> dict:
+    """
+    Solve for equilibrium pH and compare to target.
+
+    Args:
+        adm1_state: ADM1 state dict (kg/m³)
+        target_ph: Target pH from basis of design
+        max_ph_deviation: Maximum acceptable pH deviation (default: 0.5 units)
+        temperature_k: Temperature in Kelvin
+
+    Returns:
+        Dictionary with equilibrium pH, target pH, deviation, and charge balance
+    """
+    logger.info("Solving for equilibrium pH using charge balance...")
     from utils.qsdsan_validation_sync import check_charge_balance_sync
 
-    logger.info("Checking ion balance...")
-    result = check_charge_balance_sync(adm1_state, ph, temperature_k)
+    result = check_charge_balance_sync(adm1_state, target_ph, temperature_k)
+
+    # Override balanced status with custom threshold if provided
+    if max_ph_deviation != 0.5:  # If user provided custom threshold
+        result['balanced'] = result['ph_deviation'] <= max_ph_deviation
+        if not result['balanced']:
+            result['message'] = (
+                f"Equilibrium pH ({result['equilibrium_ph']:.2f}) differs from target "
+                f"({target_ph:.2f}) by {result['ph_deviation']:.2f} units "
+                f"(max allowed: {max_ph_deviation:.2f})"
+            )
 
     logger.info("Ion balance check complete")
     return result
@@ -95,6 +115,7 @@ def main():
     balance_parser = subparsers.add_parser('ion-balance', help='Check strong ion balance')
     balance_parser.add_argument('--adm1-state', required=True, help='Path to ADM1 state JSON file')
     balance_parser.add_argument('--ph', type=float, default=7.0, help='pH for speciation')
+    balance_parser.add_argument('--max-imbalance', type=float, default=5.0, help='Max imbalance percent (default: 5%%)')
     balance_parser.add_argument('--temperature-c', type=float, default=35.0, help='Temperature in Celsius')
 
     args = parser.parse_args()
@@ -115,7 +136,7 @@ def main():
             result = compute_bulk_composites_sync(adm1_state, temperature_k)
 
         elif args.command == 'ion-balance':
-            result = check_ion_balance_sync(adm1_state, args.ph, temperature_k)
+            result = check_ion_balance_sync(adm1_state, args.ph, args.max_imbalance, temperature_k)
 
         else:
             raise ValueError(f"Unknown command: {args.command}")
