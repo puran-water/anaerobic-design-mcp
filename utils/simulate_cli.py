@@ -75,7 +75,8 @@ def run_simulation(
             analyze_gas_stream,
             analyze_inhibition,
             calculate_sulfur_metrics,
-            analyze_biomass_yields
+            analyze_biomass_yields,
+            extract_diagnostics
         )
         from utils.qsdsan_loader import get_qsdsan_components
         import anyio
@@ -123,9 +124,24 @@ def run_simulation(
         influent = analyze_liquid_stream(inf_d, include_components=True)
         effluent = analyze_liquid_stream(eff_d, include_components=True)
         biogas = analyze_gas_stream(gas_d)
-        yields = analyze_biomass_yields(inf_d, eff_d)
+
+        # Extract comprehensive diagnostic data from mADM1 (needed for yields)
+        logger.info("Extracting comprehensive diagnostic data...")
+        diagnostics = extract_diagnostics(sys_d)
+
+        # Calculate yields with detailed breakdown (pass system and diagnostics)
+        yields = analyze_biomass_yields(inf_d, eff_d, system=sys_d, diagnostics=diagnostics)
+
         sulfur = calculate_sulfur_metrics(inf_d, eff_d, gas_d)
         inhibition = analyze_inhibition((sys_d, inf_d, eff_d, gas_d), speciation=sulfur.get("speciation"))
+
+        if diagnostics.get('success'):
+            logger.info(f"Diagnostic data extraction successful:")
+            logger.info(f"  - {len(diagnostics.get('biomass_kg_m3', {}))} biomass functional groups")
+            logger.info(f"  - {len(diagnostics.get('process_rates', []))} process rates")
+            logger.info(f"  - {len(diagnostics.get('inhibition', {}))} inhibition categories")
+        else:
+            logger.warning(f"Diagnostic data extraction failed: {diagnostics.get('message', 'Unknown error')}")
 
         logger.info(f"COD removal: {yields.get('COD_removal_efficiency', 0):.1f}%")
         logger.info(f"Biogas: {biogas.get('flow_total', 0):.1f} m3/d, "
@@ -179,6 +195,7 @@ def run_simulation(
                 "inhibition": inhibition
             },
             "sulfur": sulfur,
+            "diagnostics": diagnostics,  # Comprehensive diagnostic data from mADM1
             "validation": validation_results,
             "convergence": {
                 "converged_at_days": converged_at_d,

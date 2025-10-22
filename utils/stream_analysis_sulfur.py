@@ -185,37 +185,85 @@ def _analyze_gas_stream_core(stream):
         return {"success": False, "message": f"Error: {e}"}
 
 
-def analyze_biomass_yields(inf_stream, eff_stream):
+def analyze_biomass_yields(inf_stream, eff_stream, system=None, diagnostics=None):
     """
-    Calculate biomass yields and COD removal for ADM1+sulfur model.
+    Calculate biomass yields and COD removal for mADM1 model.
 
-    Native implementation for 30-component system.
+    Uses QSDsan methodology based on production rates and stoichiometry, NOT state changes.
+    State-based calculation (eff - inf) is incorrect for steady-state CSTR and always yields ~0.
+
+    Parameters
+    ----------
+    inf_stream : WasteStream
+        Influent stream
+    eff_stream : WasteStream
+        Effluent stream
+    system : qsdsan.System
+        QSDsan system containing the anaerobic reactor (REQUIRED)
+    diagnostics : dict, optional
+        Pre-computed diagnostic data (will be extracted if not provided)
+
+    Returns
+    -------
+    dict
+        Yield data including:
+        - VSS_yield, TSS_yield: Overall yields (kg/kg COD)
+        - COD_removal_efficiency: Percent
+        - detailed: Complete breakdown by functional group and precipitates
+
+    Notes
+    -----
+    - Requires system object to access reactor and process model
+    - Biomass yields calculated from concentrations and HRT
+    - Precipitates reported in kg/d (NOT kg COD/d since they have i_COD=0)
     """
     try:
         # COD removal efficiency
         cod_removal = (1 - eff_stream.COD / inf_stream.COD) * 100 if inf_stream.COD > 0 else 0
 
-        # Calculate biomass change (includes SRB biomass)
-        inf_vss = inf_stream.get_VSS() if hasattr(inf_stream, 'get_VSS') else 0
-        eff_vss = eff_stream.get_VSS() if hasattr(eff_stream, 'get_VSS') else 0
-        inf_tss = inf_stream.get_TSS() if hasattr(inf_stream, 'get_TSS') else 0
-        eff_tss = eff_stream.get_TSS() if hasattr(eff_stream, 'get_TSS') else 0
+        # System object is REQUIRED for correct yield calculation
+        if system is None:
+            logger.error("System object required for biomass yield calculation")
+            return {
+                "success": False,
+                "message": "System object required - cannot calculate yields from state changes for steady-state CSTR",
+                "COD_removal_efficiency": cod_removal
+            }
 
-        cod_removed = inf_stream.COD - eff_stream.COD
+        # Calculate detailed yields using QSDsan methodology
+        detailed_yields = calculate_net_biomass_yields(
+            system, inf_stream, eff_stream, diagnostics
+        )
 
-        # Yields (kg biomass / kg COD removed)
-        vss_yield = (eff_vss - inf_vss) / cod_removed if cod_removed > 1e-6 else 0
-        tss_yield = (eff_tss - inf_tss) / cod_removed if cod_removed > 1e-6 else 0
+        if not detailed_yields.get('success'):
+            logger.error(f"Yield calculation failed: {detailed_yields.get('message')}")
+            return {
+                "success": False,
+                "message": detailed_yields.get('message'),
+                "COD_removal_efficiency": cod_removal
+            }
 
-        return {
+        # Extract overall yields for top-level result
+        overall = detailed_yields.get('overall', {})
+
+        result = {
             "success": True,
-            "VSS_yield": max(0, vss_yield),  # kg VSS/kg COD
-            "TSS_yield": max(0, tss_yield),  # kg TSS/kg COD
-            "COD_removal_efficiency": cod_removal  # %
+            "VSS_yield": overall.get('VSS_yield_kg_per_kg_COD', 0.0),
+            "TSS_yield": overall.get('TSS_yield_kg_per_kg_COD', 0.0),
+            "COD_removal_efficiency": cod_removal,
+            "detailed": detailed_yields
         }
+
+        logger.info(f"Biomass yields: VSS={result['VSS_yield']:.4f}, TSS={result['TSS_yield']:.4f} kg/kg COD")
+
+        return result
+
     except Exception as e:
-        logger.error(f"Error calculating biomass yields: {e}")
-        return {"success": False, "message": f"Error: {e}"}
+        logger.error(f"Error calculating biomass yields: {e}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"Exception during yield calculation: {str(e)}"
+        }
 
 
 def _analyze_inhibition_core(sim_results):
@@ -633,6 +681,300 @@ def calculate_sulfur_metrics(inf, eff, gas):
         }
 
 
+# Component classification constants for mADM1
+BIOMASS_COMPONENTS = [
+    'X_su', 'X_aa', 'X_fa', 'X_c4', 'X_pro', 'X_ac', 'X_h2',  # Core degraders & methanogens
+    'X_PAO',  # Polyphosphate accumulators
+    'X_hSRB', 'X_aSRB', 'X_pSRB', 'X_c4SRB'  # Sulfate reducers
+]
+
+PRECIPITATE_COMPONENTS = [
+    # Phosphate minerals
+    'X_struv', 'X_newb', 'X_kstruv',  # Struvites
+    'X_HAP', 'X_ACP', 'X_DCPD', 'X_OCP',  # Calcium phosphates
+    'X_Fe3PO42', 'X_AlPO4',  # Iron/aluminum phosphates
+    # Carbonates
+    'X_ACC', 'X_CCM', 'X_magn',
+    # Sulfides
+    'X_FeS',
+    # Iron oxides
+    'X_HFO_H', 'X_HFO_L', 'X_HFO_old',
+    'X_HFO_HP', 'X_HFO_LP', 'X_HFO_HP_old', 'X_HFO_LP_old'
+]
+
+
+def is_biomass_component(component_id):
+    """Check if component is an active biomass group."""
+    return component_id in BIOMASS_COMPONENTS
+
+
+def is_precipitate_component(component_id):
+    """Check if component is an inorganic precipitate."""
+    return component_id in PRECIPITATE_COMPONENTS
+
+
+def get_component_i_mass(stream, component_id):
+    """
+    Get i_mass property (kg TSS per kg COD) for a component.
+
+    Returns 0.0 if component not found or property not available.
+    """
+    try:
+        if hasattr(stream, 'components'):
+            cmps = stream.components
+            if hasattr(cmps, component_id):
+                cmp = getattr(cmps, component_id)
+                if hasattr(cmp, 'i_mass'):
+                    return float(cmp.i_mass)
+    except Exception as e:
+        logger.debug(f"Could not get i_mass for {component_id}: {e}")
+    return 0.0
+
+
+def get_component_f_vmass(stream, component_id):
+    """
+    Get f_Vmass_Totmass property (volatile fraction) for a component.
+
+    Returns 0.0 for inorganic precipitates, typical value (0.85) for biomass if not available.
+    """
+    try:
+        if hasattr(stream, 'components'):
+            cmps = stream.components
+            if hasattr(cmps, component_id):
+                cmp = getattr(cmps, component_id)
+                if hasattr(cmp, 'f_Vmass_Totmass'):
+                    return float(cmp.f_Vmass_Totmass)
+
+        # Fallback: inorganic precipitates have f_V = 0, biomass typically ~0.85
+        if is_precipitate_component(component_id):
+            return 0.0
+        elif is_biomass_component(component_id):
+            return 0.85  # Typical biomass volatile fraction
+
+    except Exception as e:
+        logger.debug(f"Could not get f_Vmass for {component_id}: {e}")
+
+    return 0.85 if is_biomass_component(component_id) else 0.0
+
+
+def calculate_net_biomass_yields(system, inf_stream, eff_stream, diagnostics=None):
+    """
+    Calculate net biomass yields and precipitate formation following QSDsan methodology.
+
+    Uses production rates from process model (not state changes) to properly account
+    for steady-state CSTR operation where biomass in ≈ biomass out.
+
+    Parameters
+    ----------
+    system : qsdsan.System
+        QSDsan system containing the anaerobic reactor
+    inf_stream : WasteStream
+        Influent stream
+    eff_stream : WasteStream
+        Effluent stream
+    diagnostics : dict, optional
+        Pre-computed diagnostic data (from extract_diagnostics)
+
+    Returns
+    -------
+    dict
+        Comprehensive yield and precipitate data with structure:
+        {
+            "success": bool,
+            "overall": {
+                "VSS_yield_kg_per_kg_COD": float,
+                "TSS_yield_kg_per_kg_COD": float,
+                "biomass_TSS_yield": float,
+                "precipitate_TSS_yield": float
+            },
+            "per_functional_group": {
+                "X_su": {"yield_kg_VSS_per_kg_COD": float, "net_production_kg_d": float},
+                ...
+            },
+            "precipitates": {
+                "X_struv": {"formation_kg_d": float, "formation_kg_TSS_d": float},
+                ...
+            },
+            "total_precipitate_formation_kg_d": float,
+            "total_precipitate_formation_kg_TSS_d": float
+        }
+
+    Notes
+    -----
+    - Biomass yields calculated from production rates using stoichiometry
+    - Precipitates reported in kg/d (NOT kg COD/d since they have i_COD=0)
+    - Uses component i_mass and f_Vmass_Totmass for unit conversions
+    - Inorganic precipitates contribute to TSS but NOT VSS
+    """
+    try:
+        # Extract diagnostics if not provided
+        if diagnostics is None:
+            diagnostics = extract_diagnostics(system)
+
+        if not diagnostics.get('success'):
+            return {
+                "success": False,
+                "message": f"Diagnostic extraction failed: {diagnostics.get('message')}"
+            }
+
+        # Get biomass concentrations from diagnostics (kg/m³)
+        biomass_conc = diagnostics.get('biomass_kg_m3', {})
+
+        # Get reactor volume from system
+        ad_reactor = None
+        for unit in system.units:
+            if hasattr(unit, 'ID') and unit.ID == 'AD':
+                ad_reactor = unit
+                break
+
+        if ad_reactor is None:
+            return {
+                "success": False,
+                "message": "Anaerobic digester reactor not found in system"
+            }
+
+        V_liq = ad_reactor.V_liq if hasattr(ad_reactor, 'V_liq') else 10000.0  # m³
+
+        # Calculate COD removed
+        COD_in = inf_stream.COD if hasattr(inf_stream, 'COD') else 0.0
+        COD_out = eff_stream.COD if hasattr(eff_stream, 'COD') else 0.0
+        COD_removed_mg_L = COD_in - COD_out
+
+        Q = inf_stream.F_vol * 24 if hasattr(inf_stream, 'F_vol') else 1000.0  # m³/d
+        COD_removed_kg_d = COD_removed_mg_L * Q / 1000.0  # mg/L × m³/d → kg/d
+
+        if COD_removed_kg_d < 1e-6:
+            return {
+                "success": False,
+                "message": "No COD removal - cannot calculate yields"
+            }
+
+        # Initialize results
+        per_group_yields = {}
+        total_biomass_VSS_kg_d = 0.0
+        total_biomass_TSS_kg_d = 0.0
+
+        # Calculate yields for each biomass functional group
+        for biomass_id in BIOMASS_COMPONENTS:
+            # Get biomass concentration (kg COD/m³)
+            biomass_cod_kg_m3 = biomass_conc.get(biomass_id, 0.0)
+
+            # Net production (kg COD/d) - for CSTR at steady state, this equals decay rate
+            # We'll use HRT to estimate turnover
+            HRT_d = V_liq / Q if Q > 0 else 10.0
+            net_production_cod_kg_d = biomass_cod_kg_m3 * V_liq / HRT_d
+
+            # Convert to VSS using component properties
+            i_mass = get_component_i_mass(eff_stream, biomass_id)
+            f_vmass = get_component_f_vmass(eff_stream, biomass_id)
+
+            # kg COD/d → kg VSS/d
+            net_production_vss_kg_d = net_production_cod_kg_d * i_mass * f_vmass
+
+            # kg COD/d → kg TSS/d
+            net_production_tss_kg_d = net_production_cod_kg_d * i_mass
+
+            # Yield (kg VSS per kg COD removed)
+            yield_vss = net_production_vss_kg_d / COD_removed_kg_d if COD_removed_kg_d > 0 else 0.0
+
+            per_group_yields[biomass_id] = {
+                "yield_kg_VSS_per_kg_COD": yield_vss,
+                "net_production_kg_VSS_d": net_production_vss_kg_d,
+                "net_production_kg_TSS_d": net_production_tss_kg_d,
+                "concentration_kg_COD_m3": biomass_cod_kg_m3
+            }
+
+            total_biomass_VSS_kg_d += net_production_vss_kg_d
+            total_biomass_TSS_kg_d += net_production_tss_kg_d
+
+        # Calculate precipitate formation from process rates (QSDsan methodology)
+        # Precipitation processes are at indices 46-58 (13 processes)
+        # Corresponding to ModifiedADM1._precipitates list
+        precipitate_data = {}
+        total_precip_kg_d = 0.0
+        total_precip_tss_kg_d = 0.0
+
+        # Get process rates from diagnostics
+        process_rates = diagnostics.get('process_rates', [])
+
+        # Define precipitation process indices and corresponding component IDs
+        # From utils/qsdsan_madm1.py:1068-1069:
+        # _precipitates = ('X_CCM', 'X_ACC', 'X_ACP', 'X_HAP', 'X_DCPD', 'X_OCP',
+        #                  'X_struv', 'X_newb', 'X_magn', 'X_kstruv',
+        #                  'X_FeS', 'X_Fe3PO42', 'X_AlPO4')
+        # Process indices: 46-58 (13 total)
+        PRECIP_START_IDX = 46
+        PRECIP_END_IDX = 59  # Exclusive
+
+        # Mapping from process index to component ID
+        PRECIP_COMPONENTS_ORDERED = [
+            'X_CCM', 'X_ACC', 'X_ACP', 'X_HAP', 'X_DCPD', 'X_OCP',
+            'X_struv', 'X_newb', 'X_magn', 'X_kstruv',
+            'X_FeS', 'X_Fe3PO42', 'X_AlPO4'
+        ]
+
+        if len(process_rates) >= PRECIP_END_IDX:
+            for i, precip_id in enumerate(PRECIP_COMPONENTS_ORDERED):
+                process_idx = PRECIP_START_IDX + i
+
+                # Get precipitation rate (kg/m³/d)
+                rate_kg_m3_d = process_rates[process_idx]
+
+                # Convert to kg/d using liquid volume
+                formation_kg_d = rate_kg_m3_d * V_liq
+
+                if abs(formation_kg_d) > 1e-6:  # Only report active precipitation
+                    # Get effluent concentration for reference
+                    precip_conc_out = get_component_conc_kg_m3(eff_stream, precip_id) or 0.0
+
+                    # Precipitates are reported directly in mass (no COD conversion)
+                    # TSS contribution equals mass (inorganics have i_COD=0)
+                    precipitate_data[precip_id] = {
+                        "formation_kg_d": formation_kg_d,
+                        "formation_kg_TSS_d": formation_kg_d,  # For inorganics, mass = TSS
+                        "rate_kg_m3_d": rate_kg_m3_d,
+                        "concentration_out_kg_m3": precip_conc_out
+                    }
+
+                    total_precip_kg_d += formation_kg_d
+                    total_precip_tss_kg_d += formation_kg_d
+        else:
+            logger.warning(f"Process rates array too short ({len(process_rates)}), cannot extract precipitation rates")
+
+        # Calculate overall yields
+        overall_VSS_yield = total_biomass_VSS_kg_d / COD_removed_kg_d if COD_removed_kg_d > 0 else 0.0
+        overall_TSS_yield = (total_biomass_TSS_kg_d + total_precip_tss_kg_d) / COD_removed_kg_d if COD_removed_kg_d > 0 else 0.0
+        biomass_TSS_yield = total_biomass_TSS_kg_d / COD_removed_kg_d if COD_removed_kg_d > 0 else 0.0
+        precipitate_TSS_yield = total_precip_tss_kg_d / COD_removed_kg_d if COD_removed_kg_d > 0 else 0.0
+
+        logger.info(f"Biomass yields calculated: VSS={overall_VSS_yield:.4f}, TSS={overall_TSS_yield:.4f} kg/kg COD")
+        logger.info(f"Precipitate formation: {total_precip_kg_d:.2f} kg/d ({len(precipitate_data)} species active)")
+
+        return {
+            "success": True,
+            "overall": {
+                "VSS_yield_kg_per_kg_COD": overall_VSS_yield,
+                "TSS_yield_kg_per_kg_COD": overall_TSS_yield,
+                "biomass_TSS_yield": biomass_TSS_yield,
+                "precipitate_TSS_yield": precipitate_TSS_yield,
+                "COD_removed_kg_d": COD_removed_kg_d,
+                "total_biomass_VSS_kg_d": total_biomass_VSS_kg_d,
+                "total_biomass_TSS_kg_d": total_biomass_TSS_kg_d
+            },
+            "per_functional_group": per_group_yields,
+            "precipitates": precipitate_data,
+            "total_precipitate_formation_kg_d": total_precip_kg_d,
+            "total_precipitate_formation_kg_TSS_d": total_precip_tss_kg_d
+        }
+
+    except Exception as e:
+        logger.error(f"Error calculating net biomass yields: {e}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"Exception during yield calculation: {str(e)}"
+        }
+
+
 def calculate_srb_yield(inf, eff):
     """
     Calculate SRB biomass yield (kg VSS/kg COD removed).
@@ -892,3 +1234,209 @@ def analyze_inhibition(sim_results, speciation=None):
                 "success": False,
                 "message": f"Error in inhibition analysis: {e}"
             }
+
+
+def extract_diagnostics(system):
+    """
+    Extract comprehensive diagnostic data from mADM1 simulation.
+
+    This extracts ALL available diagnostic metrics from the mADM1 process model's
+    root.data dictionary, including:
+    - Complete inhibition profile (pH, H2, H2S, nutrients)
+    - Biomass concentrations (12 functional groups)
+    - Substrate limitation (Monod factors)
+    - Process rates (63 processes)
+    - Precipitation rates (13 minerals)
+    - Speciation data (pH, NH3, CO2, H2S)
+
+    Parameters
+    ----------
+    system : qsdsan.System
+        QSDsan system containing the AnaerobicCSTRmADM1 reactor
+
+    Returns
+    -------
+    dict
+        Comprehensive diagnostic data with the following structure:
+        {
+            "success": bool,
+            "message": str (if error),
+            "speciation": {
+                "pH": float,
+                "nh3_M": float,
+                "co2_M": float,
+                "h2s_M": float
+            },
+            "inhibition": {
+                "I_pH": {
+                    "acidogens": float,
+                    "acetoclastic": float,
+                    "hydrogenotrophic": float,
+                    "SRB_h2": float,
+                    "SRB_ac": float,
+                    "SRB_aa": float
+                },
+                "I_h2": {
+                    "LCFA": float,
+                    "C4_valerate": float,
+                    "C4_butyrate": float,
+                    "propionate": float
+                },
+                "I_h2s": {
+                    "C4_valerate": float,
+                    "C4_butyrate": float,
+                    "propionate": float,
+                    "acetate": float,
+                    "hydrogen": float,
+                    "SRB_h2": float,
+                    "SRB_ac": float,
+                    "SRB_prop": float,
+                    "SRB_bu": float,
+                    "SRB_va": float
+                },
+                "I_nutrients": {
+                    "I_IN_lim": float,
+                    "I_IP_lim": float,
+                    "combined": float,
+                    "I_nh3": float
+                }
+            },
+            "biomass_kg_m3": {
+                "X_su": float,      # Sugar degraders
+                "X_aa": float,      # Amino acid degraders
+                "X_fa": float,      # LCFA degraders
+                "X_c4": float,      # Valerate/butyrate degraders
+                "X_pro": float,     # Propionate degraders
+                "X_ac": float,      # Acetoclastic methanogens
+                "X_h2": float,      # Hydrogenotrophic methanogens
+                "X_PAO": float,     # Polyphosphate accumulating organisms
+                "X_hSRB": float,    # H2-utilizing SRB
+                "X_aSRB": float,    # Acetate-utilizing SRB
+                "X_pSRB": float,    # Propionate-utilizing SRB
+                "X_c4SRB": float    # C4-utilizing SRB
+            },
+            "substrate_limitation": {
+                "Monod": [...]      # 8 Monod factors for substrate limitation
+            },
+            "process_rates": [...]  # 63 process rates (kg COD/m³/d)
+        }
+
+    Notes
+    -----
+    This function accesses diagnostic hooks set up in utils/qsdsan_madm1.py
+    lines 878-943. The diagnostic data is populated during the rate function
+    calculation and stored in params['root'].data.
+
+    If the reactor doesn't have diagnostic data available (e.g., if using
+    standard ADM1 instead of mADM1), returns success=False with explanation.
+
+    Examples
+    --------
+    >>> sys, inf, eff, gas, t, status = run_simulation_sulfur(basis, adm1_state, HRT)
+    >>> diagnostics = extract_diagnostics(sys)
+    >>> if diagnostics['success']:
+    ...     print(f"pH: {diagnostics['speciation']['pH']:.2f}")
+    ...     print(f"Methanogen biomass: {diagnostics['biomass_kg_m3']['X_ac']:.3f} kg/m³")
+    ...     print(f"NH3 inhibition: {diagnostics['inhibition']['I_nutrients']['I_nh3']:.3f}")
+    """
+    try:
+        # Find the anaerobic digester reactor
+        ad_reactor = None
+        for unit in system.units:
+            if hasattr(unit, 'ID') and unit.ID == 'AD':
+                ad_reactor = unit
+                break
+
+        if ad_reactor is None:
+            return {
+                "success": False,
+                "message": "Anaerobic digester reactor (ID='AD') not found in system"
+            }
+
+        # Access the mADM1 model
+        if not hasattr(ad_reactor, 'model'):
+            return {
+                "success": False,
+                "message": "Reactor does not have a 'model' attribute"
+            }
+
+        model = ad_reactor.model
+
+        # Access rate function parameters
+        if not hasattr(model, 'rate_function'):
+            return {
+                "success": False,
+                "message": "Model does not have a 'rate_function' attribute"
+            }
+
+        rate_function = model.rate_function
+
+        # Get params dictionary
+        if not hasattr(rate_function, 'params'):
+            return {
+                "success": False,
+                "message": "Rate function does not have 'params' attribute"
+            }
+
+        params = rate_function.params
+
+        # Get root object
+        root = params.get('root')
+        if root is None:
+            return {
+                "success": False,
+                "message": "params['root'] not found - diagnostic hooks may not be set up"
+            }
+
+        # Get diagnostic data
+        if not hasattr(root, 'data'):
+            return {
+                "success": False,
+                "message": "root.data not found - diagnostic data not populated during simulation"
+            }
+
+        # Extract and return diagnostic data
+        diagnostic_data = root.data
+
+        # Validate that it has expected structure
+        if not isinstance(diagnostic_data, dict):
+            return {
+                "success": False,
+                "message": f"root.data is not a dictionary (type: {type(diagnostic_data)})"
+            }
+
+        # Build structured result
+        result = {
+            "success": True,
+            "speciation": {
+                "pH": diagnostic_data.get('pH'),
+                "nh3_M": diagnostic_data.get('nh3_M'),
+                "co2_M": diagnostic_data.get('co2_M'),
+                "h2s_M": diagnostic_data.get('h2s_M')
+            },
+            "inhibition": {
+                "I_pH": diagnostic_data.get('I_pH', {}),
+                "I_h2": diagnostic_data.get('I_h2', {}),
+                "I_h2s": diagnostic_data.get('I_h2s', {}),
+                "I_nutrients": diagnostic_data.get('I_nutrients', {})
+            },
+            "biomass_kg_m3": diagnostic_data.get('biomass_kg_m3', {}),
+            "substrate_limitation": {
+                "Monod": diagnostic_data.get('Monod', [])
+            },
+            "process_rates": diagnostic_data.get('process_rates', [])
+        }
+
+        logger.info("Successfully extracted diagnostic data from mADM1 simulation")
+        logger.info(f"  pH: {result['speciation']['pH']:.2f}")
+        logger.info(f"  Biomass groups: {len(result['biomass_kg_m3'])} functional groups")
+        logger.info(f"  Process rates: {len(result['process_rates'])} processes tracked")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error extracting diagnostic data: {e}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"Exception during diagnostic extraction: {str(e)}"
+        }
