@@ -26,6 +26,9 @@ import logging
 # ModifiedADM1 already contains complete sulfur biology (SRB processes, H2S inhibition, etc.)
 from utils.qsdsan_madm1 import ModifiedADM1, create_madm1_cmps
 
+# CODEX FIX: Use custom reactor that supports mADM1's 4 biogas species (CH4, CO2, H2, H2S)
+from utils.qsdsan_reactor_madm1 import AnaerobicCSTRmADM1
+
 # Import pH calculation if available
 try:
     import sys
@@ -119,8 +122,8 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_62):
         for comp_id in madm1_cmps.IDs:
             if comp_id == 'H2O':
                 continue
-            if comp_id in adm1_state_30:
-                raw = adm1_state_30[comp_id]
+            if comp_id in adm1_state_62:
+                raw = adm1_state_62[comp_id]
                 # Handle [value, unit, ...] shaped inputs
                 if isinstance(raw, (list, tuple)) and len(raw) >= 2 and isinstance(raw[1], str):
                     num = _to_number(raw)
@@ -156,16 +159,16 @@ def create_influent_stream_sulfur(Q, Temp, adm1_state_62):
         raise RuntimeError(f"Error creating influent stream with sulfur: {e}")
 
 
-def initialize_30_component_state(adm1_state_30):
+def initialize_62_component_state(adm1_state_62):
     """
-    Ensure 30-component state has sensible defaults for sulfur species.
+    Ensure 62-component mADM1 state has sensible defaults for sulfur species.
 
     CRITICAL: Starting with zero sulfate/SRB means inhibition logic stays dormant
     and SRB processes won't activate. This function ensures realistic initial values.
 
     Parameters
     ----------
-    adm1_state_30 : dict
+    adm1_state_62 : dict
         Dictionary of component concentrations (kg/m3)
 
     Returns
@@ -177,10 +180,15 @@ def initialize_30_component_state(adm1_state_30):
     -----
     - S_SO4 default: 0.1 kg S/m3 = 100 mg S/L (typical wastewater)
     - S_IS default: 0.001 kg S/m3 = 1 mg S/L (low initial sulfide)
-    - X_SRB default: 0.01 kg COD/m3 = 10 mg COD/L (seed population)
+    - SRB biomass defaults (disaggregated):
+      * X_hSRB: 0.005 kg COD/m3 = 5 mg COD/L (hydrogen-utilizing, dominant)
+      * X_aSRB: 0.003 kg COD/m3 = 3 mg COD/L (acetate-utilizing)
+      * X_pSRB: 0.001 kg COD/m3 = 1 mg COD/L (propionate-utilizing)
+      * X_c4SRB: 0.001 kg COD/m3 = 1 mg COD/L (butyrate/valerate-utilizing)
+      * Total: 0.01 kg COD/m3 = 10 mg COD/L (seed population)
 
     These defaults ensure:
-    1. SRB processes can activate immediately
+    1. SRB processes can activate immediately with proper distribution
     2. H2S inhibition can be calculated
     3. Sulfur mass balance is meaningful
     """
@@ -217,12 +225,12 @@ def initialize_30_component_state(adm1_state_30):
     extras = []
 
     for comp_id in valid_ids:
-        raw = adm1_state_30.get(comp_id)
+        raw = adm1_state_62.get(comp_id)
         val = _to_number(raw) if raw is not None else 0.0
         init_conds[comp_id] = val
 
     # Log any components in input that aren't in our component set
-    for comp_id in adm1_state_30:
+    for comp_id in adm1_state_62:
         if comp_id not in valid_ids:
             extras.append(comp_id)
     if extras:
@@ -237,9 +245,24 @@ def initialize_30_component_state(adm1_state_30):
         init_conds['S_IS'] = 0.001  # 1 mg S/L
         logger.info("S_IS not specified or zero, using default: 0.001 kg S/m3 (1 mg S/L)")
 
-    if init_conds.get('X_SRB', 0) < 1e-6:
-        init_conds['X_SRB'] = 0.01  # 10 mg COD/L
-        logger.info("X_SRB not specified or too low, using default: 0.01 kg COD/m3 (10 mg COD/L)")
+    # mADM1 uses disaggregated SRB biomass instead of lumped X_SRB
+    # Distribute seed population across all SRB types
+    srb_seed_total = 0.01  # 10 mg COD/L total
+    srb_components = {
+        'X_hSRB': 0.005,  # Hydrogen-utilizing (dominant)
+        'X_aSRB': 0.003,  # Acetate-utilizing
+        'X_pSRB': 0.001,  # Propionate-utilizing
+        'X_c4SRB': 0.001  # Butyrate/valerate-utilizing
+    }
+
+    needs_srb_default = False
+    for srb_id, default_val in srb_components.items():
+        if srb_id in valid_ids and init_conds.get(srb_id, 0) < 1e-6:
+            init_conds[srb_id] = default_val
+            needs_srb_default = True
+
+    if needs_srb_default:
+        logger.info(f"SRB biomass not specified, using defaults: X_hSRB=5, X_aSRB=3, X_pSRB=1, X_c4SRB=1 mg COD/L (total=10 mg COD/L)")
 
     return init_conds
 
@@ -279,16 +302,16 @@ def check_steady_state(eff, gas, window=5, tolerance=1e-4):
             logger.warning("Effluent stream missing dynamic tracking data")
             return False
 
-        # Get time series data
-        t_arr = eff.scope.t_arr
+        # Get time series data (FIXED: use time_series not t_arr per QSDsan API)
+        time_arr = eff.scope.time_series
 
-        if len(t_arr) < window + 1:
+        if len(time_arr) < window + 1:
             # Not enough data points yet
             return False
 
         # Get last 'window' + 1 points for numerical differentiation
         recent_indices = slice(-window-1, None)
-        t_recent = t_arr[recent_indices]
+        t_recent = time_arr[recent_indices]
 
         # Get component indices
         try:
@@ -395,7 +418,7 @@ def run_simulation_to_steady_state(sys, eff, gas, max_time=200,
     return t_current, 'max_time_reached'
 
 
-def run_simulation_sulfur(basis, adm1_state_30, HRT, simulation_time=200):
+def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
     """
     Run single ADM1+sulfur simulation at specified HRT.
 
@@ -409,7 +432,7 @@ def run_simulation_sulfur(basis, adm1_state_30, HRT, simulation_time=200):
         - 'Q': Flow rate (m3/d)
         - 'Temp': Temperature (K)
         - Other design parameters
-    adm1_state_30 : dict
+    adm1_state_62 : dict
         30-component ADM1 state (kg/m3)
         Must include all 27 ADM1 components + S_SO4, S_IS, X_SRB
     HRT : float
@@ -452,30 +475,35 @@ def run_simulation_sulfur(basis, adm1_state_30, HRT, simulation_time=200):
         madm1_model = ModifiedADM1(components=madm1_cmps)
         logger.info(f"mADM1 model created with {len(madm1_model)} processes")
 
-        # 2. Create streams with 62 mADM1 components (adm1_state_30 actually has 62 components from Codex)
+        # 2. Create streams with 62 mADM1 components (adm1_state_62 actually has 62 components from Codex)
         logger.info("Creating influent stream with mADM1 state")
-        inf = create_influent_stream_sulfur(Q, Temp, adm1_state_30)
+        inf = create_influent_stream_sulfur(Q, Temp, adm1_state_62)
         eff = WasteStream('Effluent', T=Temp)
         gas = WasteStream('Biogas')
 
-        # 3. Create AnaerobicCSTR with mADM1 model
+        # 3. Create AnaerobicCSTRmADM1 reactor (supports 4 biogas species: CH4, CO2, H2, H2S)
         V_liq = Q * HRT
         V_gas = V_liq * 0.1  # 10% of liquid volume
 
-        logger.info(f"Creating AnaerobicCSTR: V_liq={V_liq:.1f} m3, V_gas={V_gas:.1f} m3")
-        AD = su.AnaerobicCSTR(
+        logger.info(f"Creating AnaerobicCSTRmADM1: V_liq={V_liq:.1f} m3, V_gas={V_gas:.1f} m3")
+        logger.info(f"Biogas species: {madm1_model._biogas_IDs}")
+        AD = AnaerobicCSTRmADM1(
             'AD',
             ins=inf,
             outs=(gas, eff),
             model=madm1_model,
             V_liq=V_liq,
             V_gas=V_gas,
-            T=Temp
+            T=Temp,
+            isdynamic=True  # Enable dynamic simulation
         )
+        # Use algebraic H2 for stability (per Codex recommendation and BSM2 pattern)
+        AD.algebraic_h2 = True
+        logger.info(f"Reactor configured: algebraic_h2={AD.algebraic_h2}")
 
         # 4. Initialize reactor with validated mADM1 state (62 components)
         logger.info("Initializing reactor with mADM1 state")
-        init_conds = initialize_30_component_state(adm1_state_30)
+        init_conds = initialize_62_component_state(adm1_state_62)
         AD.set_init_conc(**init_conds)
         logger.info(f"Initial S_SO4={init_conds['S_SO4']:.4f}, S_IS={init_conds['S_IS']:.6f}, X_hSRB={init_conds.get('X_hSRB', 0):.4f}")
 
@@ -590,53 +618,52 @@ def assess_robustness(results_design, results_check, threshold=10.0):
     return warnings
 
 
-def run_dual_hrt_simulation(basis, adm1_state_30, heuristic_config, hrt_variation=0.2):
+def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variation=0.2):
     """
-    Run simulation at design HRT and validation HRT.
+    Run simulation at design SRT and validation SRT.
 
     Performs two simulations:
-    1. At design HRT from heuristic sizing
-    2. At design HRT * (1 + hrt_variation) for robustness check
+    1. At design SRT from heuristic sizing
+    2. At design SRT * (1 + hrt_variation) for robustness check
 
     Parameters
     ----------
     basis : dict
         Basis of design with Q, Temp, etc.
-    adm1_state_30 : dict
-        30-component ADM1 state
+    adm1_state_62 : dict
+        62-component mADM1 state
     heuristic_config : dict
-        Heuristic sizing results containing digester HRT
+        Heuristic sizing results containing digester SRT
     hrt_variation : float, optional
-        Fractional HRT variation for check (default 0.2 = ±20%)
+        Fractional SRT variation for check (default 0.2 = ±20%)
 
     Returns
     -------
     tuple
         (results_design, results_check, warnings) where:
-        - results_design: Tuple from run_simulation_sulfur at design HRT
-        - results_check: Tuple from run_simulation_sulfur at check HRT
+        - results_design: Tuple from run_simulation_sulfur at design SRT
+        - results_check: Tuple from run_simulation_sulfur at check SRT
         - warnings: List of robustness warnings
 
     Notes
     -----
-    This dual-HRT approach addresses Codex's concern about having no safety net
-    if heuristic sizing mis-specifies the retention time. Running at HRT+20%
-    validates that the design isn't sitting on a performance cliff.
+    For CSTR without MBR, SRT = HRT by definition (biomass leaves with liquid).
+    This dual-SRT approach validates that the design isn't sitting on a performance cliff.
     """
-    HRT_design = heuristic_config['digester']['HRT_days']
-    HRT_check = HRT_design * (1 + hrt_variation)
+    SRT_design = heuristic_config['digester']['srt_days']
+    SRT_check = SRT_design * (1 + hrt_variation)
 
-    logger.info(f"=== Dual-HRT Validation ===")
-    logger.info(f"Design HRT: {HRT_design} days")
-    logger.info(f"Check HRT: {HRT_check} days (+{hrt_variation*100:.0f}%)")
+    logger.info(f"=== Dual-SRT Validation ===")
+    logger.info(f"Design SRT: {SRT_design} days (HRT = SRT for CSTR)")
+    logger.info(f"Check SRT: {SRT_check} days (+{hrt_variation*100:.0f}%)")
 
-    # Run at design HRT
-    logger.info("Running simulation at design HRT...")
-    results_design = run_simulation_sulfur(basis, adm1_state_30, HRT_design)
+    # Run at design SRT
+    logger.info("Running simulation at design SRT...")
+    results_design = run_simulation_sulfur(basis, adm1_state_62, SRT_design)
 
-    # Run at check HRT
-    logger.info("Running simulation at check HRT...")
-    results_check = run_simulation_sulfur(basis, adm1_state_30, HRT_check)
+    # Run at check SRT
+    logger.info("Running simulation at check SRT...")
+    results_check = run_simulation_sulfur(basis, adm1_state_62, SRT_check)
 
     # Assess robustness
     logger.info("Assessing design robustness...")
