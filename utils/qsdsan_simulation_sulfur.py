@@ -418,6 +418,95 @@ def run_simulation_to_steady_state(sys, eff, gas, max_time=200,
     return t_current, 'max_time_reached'
 
 
+def extract_time_series(eff, gas):
+    """
+    Extract time series data from stream scopes for diagnostics.
+
+    Parameters
+    ----------
+    eff : WasteStream
+        Effluent stream with dynamic tracking
+    gas : WasteStream
+        Biogas stream with dynamic tracking
+
+    Returns
+    -------
+    dict
+        Time series data including:
+        - time: Array of time points (days)
+        - effluent_cod: COD trajectory (mg/L)
+        - effluent_vfa: VFA (S_ac) trajectory (kg/m3)
+        - effluent_biomass: Biomass (X_ac) trajectory (kg/m3)
+        - biogas_ch4: CH4 flow trajectory (m3/d)
+    """
+    time_series = {
+        'success': False,
+        'message': None,
+        'time': [],
+        'effluent_cod': [],
+        'effluent_vfa': [],
+        'effluent_biomass': [],
+        'biogas_ch4': []
+    }
+
+    try:
+        # Check if tracking data exists
+        if not hasattr(eff, 'scope') or not hasattr(eff.scope, 'record'):
+            time_series['message'] = "No dynamic tracking data available"
+            return time_series
+
+        # Extract time array
+        time_arr = eff.scope.time_series
+        time_series['time'] = time_arr.tolist()
+
+        # Extract effluent components
+        record_eff = eff.scope.record
+        components = eff.components
+
+        # Get indices for key components
+        try:
+            idx_S_ac = components.index('S_ac')
+            idx_X_ac = components.index('X_ac')
+
+            # Extract trajectories
+            time_series['effluent_vfa'] = record_eff[:, idx_S_ac].tolist()
+            time_series['effluent_biomass'] = record_eff[:, idx_X_ac].tolist()
+
+            # Calculate COD at each time point
+            # COD = sum(conc_i * i_COD_i) for all components
+            time_series['effluent_cod'] = [
+                sum(record_eff[t_idx, i] * components.i_COD[i]
+                    for i in range(len(components))) * 1000  # Convert kg/m3 to mg/L
+                for t_idx in range(len(time_arr))
+            ]
+
+        except ValueError as e:
+            logger.warning(f"Some effluent components not found: {e}")
+
+        # Extract biogas data
+        if hasattr(gas, 'scope') and hasattr(gas.scope, 'record'):
+            record_gas = gas.scope.record
+            gas_components = gas.components
+
+            try:
+                idx_ch4 = gas_components.index('S_ch4')
+                # Store CH4 concentration trajectory
+                time_series['biogas_ch4'] = record_gas[:, idx_ch4].tolist()
+
+            except ValueError:
+                logger.warning("CH4 component not found in biogas")
+
+        time_series['success'] = True
+        time_series['message'] = f"Extracted {len(time_arr)} time points"
+        logger.info(f"Time series extracted: {len(time_arr)} points from 0 to {time_arr[-1]:.1f} days")
+
+    except Exception as e:
+        time_series['message'] = f"Error extracting time series: {str(e)}"
+        logger.error(f"Failed to extract time series: {e}")
+
+    return time_series
+
+
 def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
     """
     Run single ADM1+sulfur simulation at specified HRT.
@@ -539,7 +628,10 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
         logger.info(f"COD removal: {(1 - eff.COD/inf.COD)*100:.1f}%")
         logger.info(f"Biogas production: {gas.F_vol*24:.2f} m3/d")
 
-        return sys, inf, eff, gas, converged_at, status
+        # Extract time series data for diagnostics
+        time_series_data = extract_time_series(eff, gas)
+
+        return sys, inf, eff, gas, converged_at, status, time_series_data
 
     except Exception as e:
         logger.error(f"Simulation failed: {e}")

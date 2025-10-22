@@ -1,0 +1,95 @@
+{
+  "success": true,
+  "VSS_yield": 0.07424354448331956,
+  "TSS_yield": 0.08533740745209145,
+  "COD_removal_efficiency": 43.71264092163732,
+  "detailed": {
+    "success": true,
+    "overall": {
+      "VSS_yield_kg_per_kg_COD": 0.07424354448331956,
+      "TSS_yield_kg_per_kg_COD": 0.08533740745209145,
+      "biomass_TSS_yield": 0.08533740745209145,
+      "precipitate_TSS_yield": 0.0,
+      "COD_removed_kg_d": 2135.7996354311995,
+      "total_biomass_VSS_kg_d": 158.56933524059394,
+      "total_biomass_TSS_kg_d": 182.26360372482065
+    },
+    "per_functional_group": {
+      "X_su": {
+        "yield_kg_VSS_per_kg_COD": 0.03295061692827827,
+        "net_production_kg_VSS_d": 70.37591562264984,
+        "net_production_kg_TSS_d": 80.89185703752855,
+        "concentration_kg_COD_m3": 0.1126823568532773
+      },
+      "X_aa": {
+        "yield_kg_VSS_per_kg_COD": 0.020315597233731778,
+        "net_production_kg_VSS_d": 43.39004516537142,
+        "net_production_kg_TSS_d": 49.87361513261082,
+        "concentration_kg_COD_m3": 0.0694739458797269
+      },
+      "X_fa": {
+        "yield_kg_VSS_per_kg_COD": 0.0012454426295558407,
+        "net_production_kg_VSS_d": 2.660015914155839,
+        "net_production_kg_TSS_d": 3.0574895565009643,
+        "concentration_kg_COD_m3": 0.0042590829522058445
+      },
+      "X_c4": {
+        "yield_kg_VSS_per_kg_COD": 0.005209575778430436,
+        "net_production_kg_VSS_d": 11.12661004832293,
+        "net_production_kg_TSS_d": 12.789206952095324,
+        "concentration_kg_COD_m3": 0.01781536528426879
+      },
+      "X_pro": {
+        "yield_kg_VSS_per_kg_COD": 0.0020272897636084385,
+        "net_production_kg_VSS_d": 4.329884738028306,
+        "net_production_kg_TSS_d": 4.976879009227938,
+        "concentration_kg_COD_m3": 0.00693279245985452
+      },
+      "X_ac": {
+        "yield_kg_VSS_per_kg_COD": 0.0017228821242658296,
+        "net_production_kg_VSS_d": 3.6797310128978893,
+        "net_production_kg_TSS_d": 4.229575876894126,
+        "concentration_kg_COD_m3": 0.0058917991965135195
+      },
+      "X_h2": {
+        "yield_kg_VSS_per_kg_COD": 0.005771630859209622,
+        "net_production_kg_VSS_d": 12.32704708494337,
+        "net_production_kg_TSS_d": 14.169019637865942,
+        "concentration_kg_COD_m3": 0.01973744435554726
+      },
+      "X_PAO": {
+        "yield_kg_VSS_per_kg_COD": 0.0004631711739069624,
+        "net_production_kg_VSS_d": 0.989240824372731,
+        "net_production_kg_TSS_d": 1.137058418819231,
+        "concentration_kg_COD_m3": 0.001583922377415189
+      },
+      "X_hSRB": {
+        "yield_kg_VSS_per_kg_COD": 0.0014840386074594693,
+        "net_production_kg_VSS_d": 3.1696091167777594,
+        "net_production_kg_TSS_d": 3.6432288698594935,
+        "concentration_kg_COD_m3": 0.005075017815714276
+      },
+      "X_aSRB": {
+        "yield_kg_VSS_per_kg_COD": 0.000980086277198514,
+        "net_production_kg_VSS_d": 2.0932679135317076,
+        "net_production_kg_TSS_d": 2.4060550730249513,
+        "concentration_kg_COD_m3": 0.0033516347167237576
+      },
+      "X_pSRB": {
+        "yield_kg_VSS_per_kg_COD": 0.0009902465781179085,
+        "net_production_kg_VSS_d": 2.114968280531222,
+        "net_production_kg_TSS_d": 2.430998023599106,
+        "concentration_kg_COD_m3": 0.0033863802468735555
+      },
+      "X_c4SRB": {
+        "yield_kg_VSS_per_kg_COD": 0.00108296652955649,
+        "net_production_kg_VSS_d": 2.3129995190109423,
+        "net_production_kg_TSS_d": 2.6586201367941866,
+        "concentration_kg_COD_m3": 0.003703457850554303
+      }
+    },
+    "precipitates": {},
+    "total_precipitate_formation_kg_d": 0.0,
+    "total_precipitate_formation_kg_TSS_d": 0.0
+  }
+}

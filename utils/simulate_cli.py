@@ -62,7 +62,7 @@ def run_simulation(
 
         logger.info(f"Basis: Q={basis.get('Q', 'N/A')} m3/d, T={basis.get('Temp', 'N/A')} K")
         logger.info(f"ADM1 state: {len(adm1_state)} components")
-        logger.info(f"HRT: {heuristic_config['digester']['HRT_days']} days")
+        logger.info(f"Design SRT: {heuristic_config['digester']['srt_days']} days (HRT in heuristic: {heuristic_config['digester']['HRT_days']} days)")
 
         # Import simulation modules (this takes ~18 seconds on first run)
         logger.info("Loading QSDsan components (may take ~18 seconds)...")
@@ -99,8 +99,8 @@ def run_simulation(
             )
 
             # Unpack results
-            sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d = results_design
-            sys_c, inf_c, eff_c, gas_c, converged_at_c, status_c = results_check
+            sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d, time_series_d = results_design
+            sys_c, inf_c, eff_c, gas_c, converged_at_c, status_c, time_series_c = results_check
 
             logger.info(f"Design HRT: {status_d} at t={converged_at_d} days")
             logger.info(f"Check HRT: {status_c} at t={converged_at_c} days")
@@ -110,14 +110,15 @@ def run_simulation(
                 for warning in warnings:
                     logger.warning(f"  - {warning}")
         else:
-            # Single simulation at design HRT
-            logger.info("Running single simulation at design HRT...")
-            HRT_design = heuristic_config['digester']['HRT_days']
-            sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d = run_simulation_sulfur(
-                basis, adm1_state, HRT_design
+            # Single simulation at design SRT (for CSTR, SRT = HRT)
+            SRT_design = heuristic_config['digester']['srt_days']
+            logger.info(f"Running single simulation at design SRT={SRT_design} days...")
+            sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d, time_series_d = run_simulation_sulfur(
+                basis, adm1_state, SRT_design
             )
             logger.info(f"Simulation: {status_d} at t={converged_at_d} days")
             warnings = []
+            time_series_c = None  # No check simulation in single mode
 
         # Analyze results
         logger.info("Analyzing simulation results...")
@@ -201,6 +202,10 @@ def run_simulation(
                 "converged_at_days": converged_at_d,
                 "status": status_d,
                 "runtime_seconds": runtime_seconds
+            },
+            "time_series": {
+                "design": time_series_d,
+                "check": time_series_c if validate_hrt else None
             }
         }
 

@@ -24,6 +24,12 @@ from utils.qsdsan_sulfur_kinetics import H2S_INHIBITION
 
 logger = logging.getLogger(__name__)
 
+# Constants for gas calculations
+_HOURS_PER_DAY = 24.0
+# Ideal molar volume at standard conditions (0 °C, 1 atm); aligns with ADM1 stoichiometry.
+_STD_MOLAR_VOLUME_M3_PER_KMOL = 22.414
+_SULFUR_MOLAR_MASS_KG_PER_KMOL = 32.065  # kg S per kmol
+
 
 def safe_get(stream, attr, default=None):
     """Safely get attribute from stream."""
@@ -158,9 +164,14 @@ def _analyze_gas_stream_core(stream):
 
     Provides base biogas metrics without H2S.
     Used internally by analyze_gas_stream().
+
+    Note: Uses F_vol (m³/hr at operating conditions) not F_mol, because
+    QSDsan gas streams are at process temperature (e.g., 35°C), not STP.
     """
     try:
-        flow_total = stream.F_vol * 24  # m3/d
+        # Use F_vol directly (m³/hr at operating conditions)
+        # Per QSDsan docs: For gas streams, F_vol is volumetric flow in m³/hr
+        flow_total = stream.F_vol * 24  # m3/d at operating conditions
 
         # Get gas component mole fractions
         if stream.F_mol > 0:
@@ -172,7 +183,7 @@ def _analyze_gas_stream_core(stream):
 
         return {
             "success": True,
-            "flow_total": flow_total,  # m3/d
+            "flow_total": flow_total,  # m3/d at operating conditions
             "methane_flow": flow_total * ch4_frac,
             "methane_percent": ch4_frac * 100,
             "co2_flow": flow_total * co2_frac,
@@ -390,36 +401,28 @@ def calculate_h2s_gas_ppm(gas_stream):
     - H2S partitions to gas phase based on Henry's law
     """
     try:
-        # Get S_IS concentration in gas phase
-        # In QSDsan/ADM1, S_IS represents dissolved sulfide
-        # Gaseous H2S would be tracked separately or via phase equilibrium
+        components = getattr(gas_stream, 'components', None)
+        component_ids = components.IDs if components else ()
 
-        # Check if gas stream has S_IS or H2S component
-        if hasattr(gas_stream, 'imass'):
-            # Try to get sulfide in gas
-            if 'S_IS' in gas_stream.components.IDs:
-                # Mass flow rate of H2S (kg/d)
-                m_h2s = gas_stream.imass['S_IS'] * 24  # kg/d
+        if 'S_IS' not in component_ids:
+            return 0.0
 
-                # Total gas flow (m3/d at standard conditions)
-                V_gas = gas_stream.F_vol * 24  # m3/d
+        total_mol_hr = getattr(gas_stream, 'F_mol', 0.0)
+        if total_mol_hr <= 0:
+            return 0.0
 
-                if V_gas > 0:
-                    # Concentration in mg/m3
-                    c_h2s_mg_m3 = (m_h2s * 1e6) / V_gas  # mg/m3
+        try:
+            h2s_mol_hr = gas_stream.imol['S_IS']
+        except Exception:
+            # If the component is present but mol flow is inaccessible, assume zero
+            h2s_mol_hr = 0.0
 
-                    # Convert to ppmv using ideal gas law
-                    # ppmv = (c_mg_m3 * 24.45) / MW
-                    # where 24.45 L/mol at STP, MW = 34 g/mol for H2S
-                    MW_H2S = 34.0  # g/mol
-                    ppmv = (c_h2s_mg_m3 * 24.45) / MW_H2S
+        if h2s_mol_hr <= 0:
+            return 0.0
 
-                    return ppmv
-
-        # Fallback: estimate from dissolved sulfide if available
-        # Typically H2S in gas is small fraction of total S
-        logger.warning("Could not calculate H2S in biogas directly, returning 0")
-        return 0.0
+        mol_fraction = h2s_mol_hr / total_mol_hr
+        ppmv = mol_fraction * 1e6
+        return ppmv
 
     except Exception as e:
         logger.warning(f"Error calculating H2S in biogas: {e}")
@@ -528,9 +531,10 @@ def calculate_sulfur_metrics(inf, eff, gas):
             sulfate_removal = (1 - S_SO4_out_mg_L/S_SO4_in_mg_L) * 100
 
         # Calculate mass flows (kg S/d) from concentrations and flow rates
-        Q_inf_m3_d = inf.F_vol * 24  # m3/d
-        Q_eff_m3_d = eff.F_vol * 24  # m3/d
-        Q_gas_m3_d = gas.F_vol * 24  # m3/d
+        Q_inf_m3_d = inf.F_vol * _HOURS_PER_DAY  # m3/d
+        Q_eff_m3_d = eff.F_vol * _HOURS_PER_DAY  # m3/d
+        gas_mol_hr = getattr(gas, 'F_mol', 0.0)
+        Q_gas_m3_d = gas_mol_hr * _STD_MOLAR_VOLUME_M3_PER_KMOL * _HOURS_PER_DAY  # Nm3/d
 
         # Mass flows: concentration (mg S/L) * flow (m3/d) * (1 kg / 1e6 mg) * (1000 L / m3)
         # Simplifies to: concentration (mg S/L) * flow (m3/d) / 1000 = kg S/d
@@ -540,8 +544,12 @@ def calculate_sulfur_metrics(inf, eff, gas):
 
         # H2S in biogas: use gas stream S_IS mass flow directly
         # gas.imass['S_IS'] is already in kg/hr, convert to kg/d
-        if hasattr(gas, 'imass') and 'S_IS' in gas.components.IDs:
-            h2s_biogas_kg_S_d = gas.imass['S_IS'] * 24  # kg/hr to kg/d
+        if hasattr(gas, 'imol') and 'S_IS' in gas.components.IDs:
+            try:
+                h2s_mol_hr = gas.imol['S_IS']
+            except Exception:
+                h2s_mol_hr = 0.0
+            h2s_biogas_kg_S_d = h2s_mol_hr * _SULFUR_MOLAR_MASS_KG_PER_KMOL * _HOURS_PER_DAY
         else:
             h2s_biogas_kg_S_d = 0.0
 

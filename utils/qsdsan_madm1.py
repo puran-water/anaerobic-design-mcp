@@ -814,7 +814,8 @@ def rhos_madm1(state_arr, params, T_op, h=None):
     
     # inhibition factors
     # ******************
-    unit_conversion = mass2mol_conversion(cmps)    
+    # BUG #13 FIX: mass2mol_conversion gives mol/L, need mol/m³ (×1000)
+    unit_conversion = 1e3 * mass2mol_conversion(cmps)
     if T_op == T_base:
         Ka = Kab
         KH = KHb / unit_conversion[[7,8,9,30]]
