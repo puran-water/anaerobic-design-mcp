@@ -661,8 +661,8 @@ def assess_robustness(results_design, results_check, threshold=10.0):
     """
     warnings = []
 
-    sys_d, inf_d, eff_d, gas_d, t_d, status_d = results_design
-    sys_c, inf_c, eff_c, gas_c, t_c, status_c = results_check
+    sys_d, inf_d, eff_d, gas_d, t_d, status_d, _time_series_d = results_design
+    sys_c, inf_c, eff_c, gas_c, t_c, status_c, _time_series_c = results_check
 
     # COD removal comparison with zero guard
     if inf_d.COD > 1e-6 and inf_c.COD > 1e-6:
