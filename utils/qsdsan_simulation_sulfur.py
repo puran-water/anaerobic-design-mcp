@@ -473,12 +473,18 @@ def extract_time_series(eff, gas):
             time_series['effluent_biomass'] = record_eff[:, idx_X_ac].tolist()
 
             # Calculate COD at each time point
-            # COD = sum(conc_i * i_COD_i) for all components
-            time_series['effluent_cod'] = [
-                sum(record_eff[t_idx, i] * components.i_COD[i]
-                    for i in range(len(components))) * 1000  # Convert kg/m3 to mg/L
-                for t_idx in range(len(time_arr))
-            ]
+            # Mirror WasteStream.composite('COD'): record stores mg/L, skip gases/negatives
+            # Per Codex investigation of QSDsan source:
+            # - eff.scope.record contains concentrations in mg/L (not kg/m³)
+            # - i_COD is dimensionless (kg COD/kg component)
+            # - Result is mg COD/L (no conversion needed)
+            # - Must exclude gas components (g=1) and negative i_COD
+            cod_coeff = np.asarray(components.i_COD)
+            cod_mask = (cod_coeff >= 0) * (1 - np.asarray(components.g))
+            eff_conc = record_eff[:, :len(components)]  # mg/L for each component
+            time_series['effluent_cod'] = (
+                eff_conc * cod_coeff * cod_mask
+            ).sum(axis=1).tolist()
 
         except ValueError as e:
             logger.warning(f"Some effluent components not found: {e}")
