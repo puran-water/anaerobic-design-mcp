@@ -870,8 +870,10 @@ def rhos_madm1(state_arr, params, T_op, h=None):
     # gas transfer
     # ************
     biogas_S = state_arr[[7,8,9,30]].copy()
-    biogas_S[2] = co2 / unit_conversion[9]
-    biogas_S[3] = Z_h2s / unit_conversion[30]
+    # CRITICAL FIX: co2 and Z_h2s are in mol/L, unit_conversion is in mol/m³ per kg/m³
+    # Need to multiply by 1e3 to convert mol/L → mol/m³ before dividing
+    biogas_S[2] = co2 * 1e3 / unit_conversion[9]  # CO2 in kg/m³
+    biogas_S[3] = Z_h2s * 1e3 / unit_conversion[30]  # H2S in kg/m³
     biogas_p = R * T_op * state_arr[63:67]
     rhos[-4:] = kLa * (biogas_S - KH * biogas_p)
 

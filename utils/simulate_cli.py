@@ -124,7 +124,7 @@ def run_simulation(
         logger.info("Analyzing simulation results...")
         influent = analyze_liquid_stream(inf_d, include_components=True)
         effluent = analyze_liquid_stream(eff_d, include_components=True)
-        biogas = analyze_gas_stream(gas_d)
+        biogas = analyze_gas_stream(gas_d, inf_d, eff_d)
 
         # Extract comprehensive diagnostic data from mADM1 (needed for yields)
         logger.info("Extracting comprehensive diagnostic data...")
@@ -153,7 +153,7 @@ def run_simulation(
         validation_results = None
         if validate_hrt:
             effluent_check = analyze_liquid_stream(eff_c)
-            biogas_check = analyze_gas_stream(gas_c)
+            biogas_check = analyze_gas_stream(gas_c, inf_c, eff_c)
             yields_check = analyze_biomass_yields(inf_c, eff_c)
 
             validation_results = {
