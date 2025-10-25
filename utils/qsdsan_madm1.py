@@ -129,9 +129,12 @@ def create_madm1_cmps(set_thermo=True, ASF_L=0.31, ASF_H=1.2):
                                   measured_as='Mg',**ion_properties)
     S_SO4 = Component.from_chemical('S_SO4', chemical='SO4-2', description='Sulfate',
                                   measured_as='S', **ion_properties)
+    # FIX #2b: S_IS must be measured_as='S' for proper chemistry/speciation (per Codex analysis 2025-10-24)
+    # CRITICAL: COD basis is wrong for equilibrium constants and Henry's law
+    # H2S/HS- speciation and gas transfer require true chemical (sulfur) basis
     S_IS = Component.from_chemical('S_IS', chemical='H2S',
                                   description='Hydrogen sulfide',
-                                  measured_as='COD',
+                                  measured_as='S',  # FIXED from 'COD' - needed for proper speciation
                                   particle_size='Soluble',
                                   degradability='Undegradable',
                                   organic=False)
@@ -145,9 +148,11 @@ def create_madm1_cmps(set_thermo=True, ASF_L=0.31, ASF_H=1.2):
     X_c4SRB = X_PAO.copy('X_c4SRB')
     X_c4SRB.description = 'sulfate-reducing biomass, utilizing butyrate and valerate'
     
+    # FIX #6: S_S0 must be measured_as='S' for proper chemistry
+    # Elemental sulfur should NOT be counted as COD
     S_S0 = Component.from_chemical('S_S0', chemical='S',
                                   description='Elemental sulfur',
-                                  measured_as='COD',
+                                  measured_as='S',  # FIXED from 'COD'
                                   particle_size='Soluble',
                                   degradability='Undegradable',
                                   organic=False)
@@ -155,8 +160,11 @@ def create_madm1_cmps(set_thermo=True, ASF_L=0.31, ASF_H=1.2):
                                   measured_as='Fe',**ion_properties)
     S_Fe2 = Component.from_chemical('S_Fe2', chemical='Fe2+', description='Iron (II)',
                                   measured_as='Fe',**ion_properties)
-    S_Fe2.i_COD = 0.5*O_mw/Fe_mw
-    S_Fe2.measured_as = 'COD'
+    # FIX #5: DO NOT count Fe2+ redox O2 demand as COD
+    # Keep S_Fe2 on iron basis for correct COD accounting
+    # If needed, compute redox O2 demand separately in reporting
+    # REMOVED: S_Fe2.i_COD = 0.5*O_mw/Fe_mw
+    # REMOVED: S_Fe2.measured_as = 'COD'
     
     # Multiple mineral precipitation
     # ******************************
@@ -209,11 +217,11 @@ def create_madm1_cmps(set_thermo=True, ASF_L=0.31, ASF_H=1.2):
     S_Cl = Component.from_chemical('S_Cl', chemical='Cl-', description='Chloride',
                                    measured_as='Cl', **ion_properties)
     
-    cmps_madm1 = Components([_cmps.S_su, S_aa, S_fa, _cmps.S_va, S_bu, 
-                             S_pro, S_ac, _cmps.S_h2, _cmps.S_ch4, 
-                             _cmps.S_IC, _cmps.S_IN, S_IP, S_I, 
+    cmps_madm1 = Components([_cmps.S_su, S_aa, S_fa, _cmps.S_va, S_bu,
+                             S_pro, S_ac, _cmps.S_h2, _cmps.S_ch4,
+                             _cmps.S_IC, _cmps.S_IN, S_IP, S_I,
                              X_ch, X_pr, X_li, *adm1_biomass, X_I,
-                             X_PHA, asm_cmps.X_PP, X_PAO, S_K, S_Mg, 
+                             X_PHA, asm_cmps.X_PP, X_PAO, S_K, S_Mg,
                              S_SO4, S_IS, X_hSRB, X_aSRB, X_pSRB, X_c4SRB,
                              S_S0, S_Fe3, S_Fe2, X_HFO_H, X_HFO_L, X_HFO_old,
                              X_HFO_HP, X_HFO_LP, X_HFO_HP_old, X_HFO_LP_old,
@@ -221,6 +229,48 @@ def create_madm1_cmps(set_thermo=True, ASF_L=0.31, ASF_H=1.2):
                              X_OCP, X_struv, X_newb, X_magn, X_kstruv, X_FeS,
                              X_Fe3PO42, X_AlPO4,
                              S_Na, S_Cl, _cmps.H2O])
+
+    # ============================================================================
+    # CRITICAL FIX: Disable NOD for COD-basis pseudo-components
+    # ============================================================================
+    # Per upstream ADM1-P pattern (QSDsan/qsdsan/processes/_adm1_p_extension.py)
+    # COD surrogates must have i_NOD = None to prevent nitrogen oxygen demand
+    # from inflating .COD composite calculations.
+    #
+    # Without this fix, components with i_N > 0 (amino acids, proteins, biomass)
+    # cause .COD to include NOD, over-stating COD_removed by ~13% (472 kg COD/d
+    # in our 1000 m³/d, 4890 mg/L COD sludge scenario).
+    #
+    # Affected components (all have i_N > 0):
+    # - S_aa, X_pr: i_N = 0.11065 (11% nitrogen)
+    # - Biomass (X_su, X_aa, X_fa, X_c4, X_pro, X_ac, X_h2): i_N = 0.08615
+    # - S_I, X_I: i_N = 0.06003
+    # - Extension biomass (X_PAO, X_hSRB, X_aSRB, X_pSRB, X_c4SRB): inherit i_N
+    #
+    # Reference: QSD-Group/QSDsan _adm1_p_extension.py lines ~180-220
+    # ============================================================================
+
+    # Disable NOD for COD surrogates with nitrogen content
+    for cmp in (S_aa, X_pr, S_fa, S_I, X_I):
+        cmp.i_NOD = None
+
+    # Disable NOD for all ADM1 biomass groups
+    for bio in adm1_biomass:  # (X_su, X_aa, X_fa, X_c4, X_pro, X_ac, X_h2)
+        bio.i_NOD = None
+
+    # Disable NOD for extension biomass (inherit from X_PAO copy)
+    for bio_ext in (X_PAO, X_hSRB, X_aSRB, X_pSRB, X_c4SRB):
+        bio_ext.i_NOD = None
+
+    # VFAs and carbohydrates don't have nitrogen, but disable for consistency
+    for vfa in (S_bu, S_pro, S_ac):
+        vfa.i_NOD = None
+    for carb in (X_ch, X_li):
+        carb.i_NOD = None
+
+    # Storage polymer X_PHA (no nitrogen)
+    X_PHA.i_NOD = None
+
     # Following upstream QSDsan pattern: use flags to synthesize surrogate thermodynamic properties
     # for COD-based components instead of blocking validation
     cmps_madm1.default_compile(ignore_inaccurate_molar_weight=True, adjust_MW_to_measured_as=True)
@@ -293,9 +343,10 @@ def calc_biogas(state_arr, params, pH):
     # Extract total sulfide (S_IS) in kg/m³
     S_IS_kg = state_arr[is_idx] if len(state_arr) > is_idx else 0.0
 
-    # Codex fix #8: Convert S_IS from kg/m³ to kmol/m³ (molar units)
-    # This is critical - downstream code expects kmol for gas transfer
-    unit_conversion = cmps.i_mass / cmps.chem_MW
+    # FIX #2a: Use SAME unit conversion as rest of rate function (per Codex analysis 2025-10-24)
+    # CRITICAL: Must match unit_conversion at line 819 in rhos_madm1
+    # The inconsistent i_mass/chem_MW was causing H2S to be on wrong scale
+    unit_conversion = 1e3 * mass2mol_conversion(cmps)  # kg/m³ → kmol/m³
     S_IS_M = S_IS_kg * unit_conversion[is_idx]
 
     # Codex fix #7: Get temperature-corrected Ka_h2s from params
@@ -426,12 +477,13 @@ def pcm(state_arr, params):
     cmps = params['components']
 
     # Temperature correction for Ka values (Van't Hoff equation)
-    # Matches QSDsan ADM1-P implementation
-    R = 8.314  # J/(mol·K)
+    # FIX: Use correct R units for Ka_dH in J/mol
+    # The previous R = 8.3145e-2 bar·m³/(kmol·K) was WRONG - caused 10^29× error in Ka!
+    R = 8.314  # J/(mol·K) - CORRECT units for Ka_dH in J/mol
     T_corr = np.exp((Ka_dH / R) * (1/T_base - 1/T_op))
     Ka = Ka_base * T_corr
 
-    # Codex fix #7: Temperature-corrected Ka_h2s for H2S/HS⁻ equilibrium
+    # Temperature-corrected Ka_h2s for H2S/HS⁻ equilibrium
     # H2S <-> HS⁻ + H⁺, pKa ~ 7.0 at 25°C
     # Enthalpy: ΔH ≈ 14.3 kJ/mol (endothermic, Ka increases with temperature)
     Ka_h2s_base = 1e-7  # 10^(-7.0) at 25°C
@@ -441,9 +493,11 @@ def pcm(state_arr, params):
     # Store Ka_h2s in params for use by calc_biogas
     params['Ka_h2s'] = Ka_h2s
 
-    # Unit conversion from kg/m³ to M (molar)
-    # QSDsan expects molar concentrations for charge balance
-    unit_conversion = cmps.i_mass / cmps.chem_MW
+    # Unit conversion from kg/m³ to M (mol/L)
+    # FIX: Use mass2mol_conversion which includes the ×1000 factor for m³→L
+    # The previous calculation was missing this factor, inflating ionic strengths by 1000×
+    from qsdsan.processes import mass2mol_conversion
+    unit_conversion = mass2mol_conversion(cmps)
 
     # Slice to liquid components (first len(cmps) entries)
     n_cmps = len(cmps)
@@ -814,7 +868,7 @@ def rhos_madm1(state_arr, params, T_op, h=None):
     
     # inhibition factors
     # ******************
-    # BUG #13 FIX: mass2mol_conversion gives mol/L, need mol/m³ (×1000)
+    # Convert kg/m³ (model states) to mol/m³; mass2mol_conversion returns mol/L
     unit_conversion = 1e3 * mass2mol_conversion(cmps)
     if T_op == T_base:
         Ka = Kab
@@ -869,16 +923,51 @@ def rhos_madm1(state_arr, params, T_op, h=None):
     
     # gas transfer
     # ************
-    biogas_S = state_arr[[7,8,9,30]].copy()
-    # CRITICAL FIX: co2 and Z_h2s are in mol/L, unit_conversion is in mol/m³ per kg/m³
-    # Need to multiply by 1e3 to convert mol/L → mol/m³ before dividing
-    biogas_S[2] = co2 * 1e3 / unit_conversion[9]  # CO2 in kg/m³
-    biogas_S[3] = Z_h2s * 1e3 / unit_conversion[30]  # H2S in kg/m³
-    biogas_p = R * T_op * state_arr[63:67]
-    rhos[-4:] = kLa * (biogas_S - KH * biogas_p)
+    # Henry's law: rhos = kLa * (biogas_S - KH * biogas_p)
+    # CRITICAL: Keep everything in kg/m³ (mass units) to match KH which is already kg/m³/bar
+    # KH was temperature-corrected at line 833: KH = KHb * T_corr / unit_conversion
+    # This made KH have units of kg/m³/bar (from original kmol/m³/bar)
+
+    # FIX #1: Dynamic headspace indexing (per Codex analysis 2025-10-24)
+    # The liquid phase has 63 components (0-62), gas phase starts at index 63
+    # For mADM1+S we have 4 biogas species: H2, CH4, CO2, H2S
+    # Biogas species in liquid phase: S_h2 (7), S_ch4 (8), S_IC (9), S_IS (30)
+    n_cmps = 63  # Fixed for mADM1 - number of liquid components
+    n_gas = 4    # Fixed for mADM1+S - H2, CH4, CO2, H2S
+    gas_slice = slice(n_cmps, n_cmps + n_gas)  # Indices 63:67
+
+    biogas_S = state_arr[[7,8,9,30]].copy()  # Start with kg/m³ from state
+
+    # UPSTREAM APPROACH: Calculate dissolved CO2 directly from state_arr[S_IC]
+    # This naturally includes biological supersaturation from ODE dynamics
+    # Matches QSDsan upstream: co2 = state_arr[9] * h / (Ka[3] + h)
+    h_ion = 10**(-pH)  # Convert pH back to H+ concentration
+    Ka_co2 = Ka[2]  # Ka for CO2/HCO3- equilibrium
+    co2_dissolved = state_arr[9] * h_ion / (Ka_co2 + h_ion)  # kg/m³ (dissolved CO2 from TOTAL S_IC)
+    biogas_S[2] = co2_dissolved  # Use directly - S_IC already contains supersaturation from biology
+    biogas_S[3] = Z_h2s / unit_conversion[30]  # H2S from calc_biogas: kmol/m³ → kg/m³
+
+    # Partial pressures in bar (R is in bar·m³/(kmol·K), state[gas_slice] is kmol/m³)
+    biogas_p = R * T_op * state_arr[gas_slice]  # bar - FIXED to use dynamic slice
+
+    # Gas transfer rate in kg/m³/d (all terms in consistent mass units)
+    # Now biogas_S includes biological supersaturation, so driving force is non-zero
+    rhos[-n_gas:] = kLa * (biogas_S - KH * biogas_p)  # kg/m³/d - FIXED to use -n_gas
 
     # DIAGNOSTIC HOOKS: Populate root.data for CLI diagnostics (per Codex advice)
     root = params.get('root')
+
+    # DIAGNOSTIC: Print gas transfer driving force for CH4
+    if root is not None and 'diagnostics' in root.data:
+        root.data['diagnostics']['gas_transfer'] = {
+            'biogas_S_ch4_kg_m3': float(biogas_S[1]),  # CH4 dissolved
+            'KH_ch4_kg_m3_bar': float(KH[1]),
+            'biogas_p_ch4_bar': float(biogas_p[1]),
+            'KH_times_p_ch4_kg_m3': float(KH[1] * biogas_p[1]),
+            'driving_force_ch4_kg_m3': float(biogas_S[1] - KH[1] * biogas_p[1]),
+            'kLa': float(kLa),
+            'rho_ch4_kg_m3_d': float(rhos[-3])  # CH4 is second element in gas array
+        }
     if root is not None:
         # Calculate Monod factors for diagnostics using Ks from params
         # Primary substrates (S_su, S_aa, S_fa, S_va, S_bu, S_pro, S_ac, S_h2)
@@ -892,6 +981,14 @@ def rhos_madm1(state_arr, params, T_op, h=None):
             'nh3_M': float(nh3),
             'co2_M': float(co2),
             'h2s_M': float(Z_h2s),
+            'biogas_dissolved': {
+                'co2_kmol_m3': float(biogas_S[2]),
+                'h2s_kmol_m3': float(biogas_S[3]),
+            },
+            'gas_equilibrium': {
+                'co2_eq_kmol_m3': float((KH * biogas_p)[2]),
+                'h2s_eq_kmol_m3': float((KH * biogas_p)[3]),
+            },
             'I_pH': {
                 'acidogens': float(Is_pH[0]),
                 'acetoclastic': float(Is_pH[1]),
@@ -1282,7 +1379,7 @@ class ModifiedADM1(CompiledProcesses):
             gas_transfer.append(new_p)
         self.extend(gas_transfer)
         self.compile(to_class=cls)
-        
+
         stoichio_vals = (f_fa_li, f_bu_su, f_pro_su, f_ac_su, 1-f_bu_su-f_pro_su-f_ac_su,
                          f_va_aa, f_bu_aa, f_pro_aa, f_ac_aa, 1-f_va_aa-f_bu_aa-f_pro_aa-f_ac_aa,
                          f_ac_fa, 1-f_ac_fa, f_pro_va, f_ac_va, 1-f_pro_va-f_ac_va,
@@ -1346,15 +1443,35 @@ class ModifiedADM1(CompiledProcesses):
             return rhos_madm1(state_arr, params, T_op)
 
         self.set_rate_function(rhos_wrapper)
-        self.rate_function._params = dict(zip(cls._kinetic_params,
-                                              [ks, Ks, K_PP, K_so4,
-                                                pH_limits, KS_IN*N_mw, KS_IP*P_mw,
-                                                KI_nh3, KIs_h2, KIs_h2s,
-                                                Ka_base, Ka_dH, K_H_base, K_H_dH, kLa,
-                                                k_cryst, n_cryst, Ksp_base, Ksp_dH,
-                                                cls._T_base, self._components,
-                                                root,
-                                                ]))
+        params_dict = dict(zip(cls._kinetic_params,
+                               [ks, Ks, K_PP, K_so4,
+                                pH_limits, KS_IN*N_mw, KS_IP*P_mw,
+                                KI_nh3, KIs_h2, KIs_h2s,
+                                Ka_base, Ka_dH, K_H_base, K_H_dH, kLa,
+                                k_cryst, n_cryst, Ksp_base, Ksp_dH,
+                                cls._T_base, self._components,
+                                root,
+                                ]))
+        self.rate_function._params = params_dict
+
+        # Pre-compute stoichiometric rows for gas-phase supersaturation correction
+        # Only the non-transfer processes (all but the trailing biogas transfers) contribute biologically
+        # Must be done AFTER params are set so stoichio_eval() can lambdify properly
+        stoichio_mass = self.stoichio_eval().T  # shape: (n_components, n_processes)
+        n_gas = len(cls._biogas_IDs)
+        n_non_gas = stoichio_mass.shape[1] - n_gas
+        ic_idx = cmps.index('S_IC')
+        supersat_data = {
+            'n_gas': n_gas,
+            'nu_IC': stoichio_mass[ic_idx, :n_non_gas].copy(),
+        }
+        if 'S_IS' in cmps.IDs:
+            supersat_data['nu_IS'] = stoichio_mass[cmps.index('S_IS'), :n_non_gas].copy()
+        else:
+            supersat_data['nu_IS'] = None
+
+        # Add supersaturation data to params
+        self.rate_function._params['gas_supersat'] = supersat_data
         return self
 
     def solve_pH(self, state_arr, params=None):

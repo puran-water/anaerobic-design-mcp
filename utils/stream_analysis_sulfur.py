@@ -124,6 +124,63 @@ def get_component_conc(stream, component_id, units='mg/L'):
         return get_component_conc_mg_L(stream, component_id)
 
 
+def _calculate_stream_ph(stream):
+    """
+    Calculate pH from charge balance using validation solver (gas-phase independent).
+
+    Uses Henderson-Hasselbalch equilibrium without assuming gas-liquid equilibrium.
+    This is correct for influent/effluent streams that are not in equilibrium with biogas.
+
+    Parameters
+    ----------
+    stream : WasteStream
+        Stream to calculate pH for
+
+    Returns
+    -------
+    float
+        Calculated pH from charge balance
+    """
+    try:
+        from utils.qsdsan_validation_sync import check_charge_balance_sync_lightweight
+
+        # Extract ADM1 state from stream (convert to kg/m³)
+        if not hasattr(stream, 'F_vol') or stream.F_vol == 0:
+            return 7.0  # Default if no flow
+
+        adm1_state = {}
+        for cmp in stream.components:
+            conc_kg_m3 = stream.imass[cmp.ID] / stream.F_vol if stream.F_vol > 0 else 0
+            adm1_state[cmp.ID] = conc_kg_m3
+
+        # Get temperature (K)
+        temperature_k = stream.T if hasattr(stream, 'T') else 308.15
+
+        # Solve for equilibrium pH using charge balance (gas-independent)
+        # Try a reasonable initial pH guess
+        result = check_charge_balance_sync_lightweight(adm1_state, ph=7.0, temperature_k=temperature_k)
+
+        # Use brentq to find pH where charge residual = 0
+        from scipy.optimize import brentq
+
+        def charge_residual(ph_trial):
+            res = check_charge_balance_sync_lightweight(adm1_state, ph_trial, temperature_k)
+            return res['residual_meq_l']
+
+        try:
+            equilibrium_ph = brentq(charge_residual, 4.0, 10.0, xtol=0.01)
+            return round(equilibrium_ph, 2)
+        except ValueError:
+            # If no root found, use the pH with smallest residual
+            residual_low = abs(charge_residual(4.0))
+            residual_high = abs(charge_residual(10.0))
+            return 4.0 if residual_low < residual_high else 10.0
+
+    except Exception as e:
+        logger.warning(f"Could not calculate pH from charge balance: {e}")
+        return 7.0  # Fallback to neutral
+
+
 def _analyze_liquid_stream_core(stream, include_components=False):
     """
     Core liquid stream analysis (private helper).
@@ -132,11 +189,15 @@ def _analyze_liquid_stream_core(stream, include_components=False):
     Used internally by analyze_liquid_stream().
     """
     try:
+        # Calculate pH from charge balance (gas-phase independent)
+        # This is correct for influent/effluent that are not in biogas equilibrium
+        calculated_ph = _calculate_stream_ph(stream)
+
         result = {
             "success": True,
             "flow": stream.F_vol * 24 if hasattr(stream, 'F_vol') else 0,  # m3/d
             "temperature": stream.T if hasattr(stream, 'T') else 308.15,
-            "pH": stream.pH if hasattr(stream, 'pH') else 7.0,
+            "pH": calculated_ph,  # Gas-independent charge balance pH
             "COD": stream.COD if hasattr(stream, 'COD') else 0,  # mg/L
             "TSS": stream.get_TSS() if hasattr(stream, 'get_TSS') else 0,
             "VSS": stream.get_VSS() if hasattr(stream, 'get_VSS') else 0,
@@ -165,30 +226,43 @@ def _analyze_gas_stream_core(stream):
     Provides base biogas metrics without H2S.
     Used internally by analyze_gas_stream().
 
-    Note: Uses F_vol (m³/hr at operating conditions) not F_mol, because
-    QSDsan gas streams are at process temperature (e.g., 35°C), not STP.
+    FIX #3 (Codex 2025-10-24): Convert to STP Nm³/d for proper comparison
+    with theoretical methane yield (0.35 Nm³/kg COD).
+    Uses F_mol (kmol/hr) and standard molar volume (22.414 L/mol at STP).
     """
     try:
-        # Use F_vol directly (m³/hr at operating conditions)
-        # Per QSDsan docs: For gas streams, F_vol is volumetric flow in m³/hr
-        flow_total = stream.F_vol * 24  # m3/d at operating conditions
+        # FIX #3: Use molar flow and STP conversion (Codex analysis 2025-10-24)
+        # Standard molar volume at STP: 22.414 L/mol = 0.022414 m³/mol
+        STP_MOLAR_VOLUME = 22.414  # L/mol at STP (0°C, 1 atm)
 
-        # Get gas component mole fractions
+        # Get component molar flows (kmol/hr)
         if stream.F_mol > 0:
+            ch4_mol = stream.imol['S_ch4'] if 'S_ch4' in stream.components.IDs else 0  # kmol/hr
+            co2_mol = stream.imol['S_IC'] if 'S_IC' in stream.components.IDs else 0   # kmol/hr
+            h2_mol = stream.imol['S_h2'] if 'S_h2' in stream.components.IDs else 0    # kmol/hr
+
+            # Convert kmol/hr → mol/hr → L/hr → m³/hr → m³/d at STP
+            ch4_flow = ch4_mol * 1000 * STP_MOLAR_VOLUME / 1000 * 24  # Nm³/d
+            co2_flow = co2_mol * 1000 * STP_MOLAR_VOLUME / 1000 * 24  # Nm³/d
+            h2_flow = h2_mol * 1000 * STP_MOLAR_VOLUME / 1000 * 24   # Nm³/d
+            flow_total = ch4_flow + co2_flow + h2_flow  # Nm³/d
+
+            # Calculate percentages
             ch4_frac = stream.imol['S_ch4'] / stream.F_mol if 'S_ch4' in stream.components.IDs else 0
             co2_frac = stream.imol['S_IC'] / stream.F_mol if 'S_IC' in stream.components.IDs else 0
             h2_frac = stream.imol['S_h2'] / stream.F_mol if 'S_h2' in stream.components.IDs else 0
         else:
+            ch4_flow = co2_flow = h2_flow = flow_total = 0
             ch4_frac = co2_frac = h2_frac = 0
 
         return {
             "success": True,
-            "flow_total": flow_total,  # m3/d at operating conditions
-            "methane_flow": flow_total * ch4_frac,
+            "flow_total": flow_total,  # Nm³/d at STP (FIXED)
+            "methane_flow": ch4_flow,  # Nm³/d at STP (FIXED)
             "methane_percent": ch4_frac * 100,
-            "co2_flow": flow_total * co2_frac,
+            "co2_flow": co2_flow,      # Nm³/d at STP (FIXED)
             "co2_percent": co2_frac * 100,
-            "h2_flow": flow_total * h2_frac,
+            "h2_flow": h2_flow,        # Nm³/d at STP (FIXED)
             "h2_percent": h2_frac * 100
         }
     except Exception as e:
@@ -693,6 +767,7 @@ def calculate_sulfur_metrics(inf, eff, gas):
 BIOMASS_COMPONENTS = [
     'X_su', 'X_aa', 'X_fa', 'X_c4', 'X_pro', 'X_ac', 'X_h2',  # Core degraders & methanogens
     'X_PAO',  # Polyphosphate accumulators
+    'X_PHA',  # Storage polymer (polyhydroxyalkanoates)
     'X_hSRB', 'X_aSRB', 'X_pSRB', 'X_c4SRB'  # Sulfate reducers
 ]
 
@@ -862,15 +937,41 @@ def calculate_net_biomass_yields(system, inf_stream, eff_stream, diagnostics=Non
         total_biomass_VSS_kg_d = 0.0
         total_biomass_TSS_kg_d = 0.0
 
+        # Get model and stoichiometry matrix for M@r calculation (upstream QSDsan method)
+        model = ad_reactor.model if hasattr(ad_reactor, 'model') else None
+        process_rates = diagnostics.get('process_rates', [])
+
+        # Use stoichiometric matrix approach: prod_rates = M.T @ process_rates
+        # This is the standard QSDsan method, NOT washout
+        component_production_rates = None
+        if model is not None and len(process_rates) > 0:
+            try:
+                # Get stoichiometry matrix (processes × components)
+                M = model.stoichio_eval()
+                # Compute component production rates: M.T @ rho (kg/m³/d)
+                component_production_rates = M.T @ process_rates
+            except Exception as e:
+                logger.warning(f"Could not compute M@r for biomass yields: {e}")
+
         # Calculate yields for each biomass functional group
         for biomass_id in BIOMASS_COMPONENTS:
             # Get biomass concentration (kg COD/m³)
             biomass_cod_kg_m3 = biomass_conc.get(biomass_id, 0.0)
 
-            # Net production (kg COD/d) - for CSTR at steady state, this equals decay rate
-            # We'll use HRT to estimate turnover
-            HRT_d = V_liq / Q if Q > 0 else 10.0
-            net_production_cod_kg_d = biomass_cod_kg_m3 * V_liq / HRT_d
+            # Net production (kg COD/d) using M@r approach (QSDsan methodology)
+            if component_production_rates is not None:
+                try:
+                    # Get component index
+                    cmp_idx = list(eff_stream.components.IDs).index(biomass_id)
+                    prod_rate_kg_m3_d = component_production_rates[cmp_idx]
+                    # Only count positive production (net growth, not decay)
+                    net_production_cod_kg_d = max(0.0, prod_rate_kg_m3_d * V_liq)
+                except (ValueError, IndexError):
+                    # Component not found or index error - fall back to zero
+                    net_production_cod_kg_d = 0.0
+            else:
+                # Fallback: if M@r failed, use zero (better than wrong washout estimate)
+                net_production_cod_kg_d = 0.0
 
             # Convert to VSS using component properties
             i_mass = get_component_i_mass(eff_stream, biomass_id)
@@ -1082,7 +1183,7 @@ def analyze_liquid_stream(stream, include_components=False):
     return result
 
 
-def analyze_gas_stream(stream):
+def analyze_gas_stream(stream, inf_stream=None, eff_stream=None):
     """
     Analyze biogas stream for ADM1+sulfur model.
 
@@ -1092,6 +1193,10 @@ def analyze_gas_stream(stream):
     ----------
     stream : WasteStream
         Biogas stream
+    inf_stream : WasteStream, optional
+        Influent stream (required for methane yield calculation)
+    eff_stream : WasteStream, optional
+        Effluent stream (required for methane yield calculation)
 
     Returns
     -------
@@ -1100,6 +1205,8 @@ def analyze_gas_stream(stream):
         - Gas flows (total, CH4, CO2, H2)
         - Gas composition (CH4%, CO2%, H2%)
         - H2S content (ppm)
+        - methane_yield_m3_kg_cod: Specific methane yield (if influent/effluent provided)
+        - methane_yield_efficiency_percent: % of theoretical (0.35 m3/kg COD)
     """
     # Get base ADM1 gas analysis
     result = _analyze_gas_stream_core(stream)
@@ -1118,6 +1225,36 @@ def analyze_gas_stream(stream):
     except Exception as e:
         logger.warning(f"Could not add H2S to gas stream: {e}")
         result['h2s_ppm'] = 0.0
+
+    # Calculate methane yield if influent/effluent provided
+    if inf_stream is not None and eff_stream is not None:
+        try:
+            methane_flow = result.get('methane_flow', 0)  # Nm³/d at STP (FIXED)
+            inf_cod = inf_stream.COD  # mg/L
+            eff_cod = eff_stream.COD  # mg/L
+            flow = inf_stream.F_vol * 24  # m3/d (convert m3/hr to m3/d)
+
+            cod_removed_kg_d = (inf_cod - eff_cod) * flow / 1000  # kg/d
+
+            if cod_removed_kg_d > 0:
+                methane_yield = methane_flow / cod_removed_kg_d  # Nm³ CH4/kg COD at STP (FIXED)
+                theoretical_yield = 0.35  # Nm³ CH4/kg COD at STP
+                efficiency_pct = (methane_yield / theoretical_yield) * 100
+
+                result['methane_yield_m3_kg_cod'] = methane_yield
+                result['methane_yield_m3_kg_cod_units'] = 'Nm3 CH4/kg COD removed (STP)'  # FIXED
+                result['methane_yield_theoretical'] = theoretical_yield
+                result['methane_yield_efficiency_percent'] = efficiency_pct
+
+                logger.info(f"Methane yield: {methane_yield:.4f} m3/kg COD ({efficiency_pct:.1f}% of theoretical)")
+            else:
+                result['methane_yield_m3_kg_cod'] = None
+                result['methane_yield_efficiency_percent'] = None
+
+        except Exception as e:
+            logger.warning(f"Could not calculate methane yield: {e}")
+            result['methane_yield_m3_kg_cod'] = None
+            result['methane_yield_efficiency_percent'] = None
 
     return result
 

@@ -126,10 +126,11 @@ class AnaerobicCSTRmADM1(AnaerobicCSTR):
         n_gas = self._n_gas
         V_liq = self.V_liq
         V_gas = self.V_gas
-        # BUG #13 FIX: mass2mol_conversion gives mol/L, need mol/m³ (×1000)
-        # Our custom create_madm1_cmps() uses chem_MW in g/mol (not kg/mol like standard ADM1)
-        # Therefore i_mass/chem_MW gives mol/L per (kg/m³), need ×1e3 for mol/m³ per (kg/m³)
-        gas_mass2mol_conversion = 1e3 * (cmps.i_mass / cmps.chem_MW)[self._gas_cmp_idx]
+        # FIX #4: Gas mass-to-molar conversion (kg/m³ → kmol/m³)
+        # CRITICAL: Rate function returns rhos in kg/m³/d (mass basis, NOT COD basis)
+        # Must use pure molecular weight conversion: 1/MW, NOT i_mass/MW
+        # Using i_mass/MW (COD-weighted) would undercount CH4 moles by ~4×
+        gas_mass2mol_conversion = 1.0 / cmps.chem_MW[self._gas_cmp_idx]  # kmol/kg
         hasexo = bool(len(self._exovars))
         f_exovars = self.eval_exo_dynamic_vars
         f_qgas = self.f_q_gas_fixed_P_headspace if self._fixed_P_gas else self.f_q_gas_var_P_headspace

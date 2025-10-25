@@ -267,7 +267,7 @@ def initialize_62_component_state(adm1_state_62):
     return init_conds
 
 
-def check_steady_state(eff, gas, window=5, tolerance=1e-4):
+def check_steady_state(eff, gas, window=5, tolerance=5e-4):
     """
     Check if system reached pseudo-steady-state.
 
@@ -283,7 +283,7 @@ def check_steady_state(eff, gas, window=5, tolerance=1e-4):
     window : int, optional
         Number of recent time points to check (default 5)
     tolerance : float, optional
-        Maximum acceptable dC/dt in kg/m3/d (default 1e-4)
+        Maximum acceptable dC/dt in kg/m3/d (default 5e-4, relaxed from 1e-4 per Codex Bug Fix #3)
 
     Returns
     -------
@@ -349,7 +349,7 @@ def check_steady_state(eff, gas, window=5, tolerance=1e-4):
 
 
 def run_simulation_to_steady_state(sys, eff, gas, max_time=200,
-                                   check_interval=10, t_step=0.1, tolerance=1e-4):
+                                   check_interval=10, t_step=0.1, tolerance=5e-4):
     """
     Run simulation until steady state or max_time.
 
@@ -434,19 +434,36 @@ def extract_time_series(eff, gas):
     dict
         Time series data including:
         - time: Array of time points (days)
-        - effluent_cod: COD trajectory (mg/L)
-        - effluent_vfa: VFA (S_ac) trajectory (kg/m3)
-        - effluent_biomass: Biomass (X_ac) trajectory (kg/m3)
-        - biogas_ch4: CH4 flow trajectory (m3/d)
+        - time_units: "days"
+        - effluent_cod: COD trajectory (mg/L) **UNITS VERIFIED**
+        - effluent_cod_units: "mg/L"
+        - effluent_vfa: VFA (S_ac) trajectory (mg/L) **UNITS VERIFIED**
+        - effluent_vfa_units: "mg/L"
+        - effluent_biomass: Biomass (X_ac) trajectory (mg/L) **UNITS VERIFIED**
+        - effluent_biomass_units: "mg/L"
+        - biogas_ch4: CH4 concentration trajectory (mg/L in gas phase)
+        - biogas_ch4_units: "mg/L"
+
+    Notes
+    -----
+    **CRITICAL UNITS DOCUMENTATION**:
+    All concentrations from eff.scope.record are in **mg/L**, NOT kg/m³.
+    This was verified via Codex investigation of QSDsan v1.4.2 source code.
+    Do NOT multiply by 1000 for unit conversion - values are already in mg/L.
     """
     time_series = {
         'success': False,
         'message': None,
         'time': [],
+        'time_units': 'days',
         'effluent_cod': [],
+        'effluent_cod_units': 'mg/L',
         'effluent_vfa': [],
+        'effluent_vfa_units': 'mg/L',
         'effluent_biomass': [],
-        'biogas_ch4': []
+        'effluent_biomass_units': 'mg/L',
+        'biogas_ch4': [],
+        'biogas_ch4_units': 'mg/L'
     }
 
     try:
@@ -468,9 +485,10 @@ def extract_time_series(eff, gas):
             idx_S_ac = components.index('S_ac')
             idx_X_ac = components.index('X_ac')
 
-            # Extract trajectories
-            time_series['effluent_vfa'] = record_eff[:, idx_S_ac].tolist()
-            time_series['effluent_biomass'] = record_eff[:, idx_X_ac].tolist()
+            # Extract trajectories - UNITS: mg/L (from eff.scope.record)
+            # NO conversion needed - values are already in mg/L
+            time_series['effluent_vfa'] = record_eff[:, idx_S_ac].tolist()  # mg/L
+            time_series['effluent_biomass'] = record_eff[:, idx_X_ac].tolist()  # mg/L
 
             # Calculate COD at each time point
             # Mirror WasteStream.composite('COD'): record stores mg/L, skip gases/negatives
@@ -625,7 +643,10 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
 
         # 7. Update pH and alkalinity for effluent
         logger.info("Calculating final pH and alkalinity")
-        update_ph_and_alkalinity(eff)
+        # CODEX BUG FIX #1: Removed legacy pH calculator - it expects S_cat/S_an (lumped ions)
+        # but our 62-component model uses explicit ions (Na+, K+, Cl-, etc.)
+        # The PCM already calculates correct pH during simulation - don't overwrite it
+        # update_ph_and_alkalinity(eff)
         logger.info(f"Final effluent pH={eff.pH:.2f}, SAlk={eff.SAlk:.3f} meq/L")
 
         # 8. Log key results

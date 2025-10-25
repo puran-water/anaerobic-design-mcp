@@ -34,6 +34,42 @@ Two MCP servers work together in this project:
 1. **anaerobic-design**: Main server with tools for basis of design, sizing, simulation
 2. **ADM1-State-Variable-Estimator**: Codex-based server for mADM1 state generation (GPT-5, high reasoning effort)
 
+## CRITICAL UNITS DOCUMENTATION - MUST REMEMBER
+
+### QSDsan Time Series Data Units (**VERIFIED via Codex**)
+
+**ALL concentrations from `stream.scope.record` are in mg/L, NOT kg/m³**
+
+```python
+# CORRECT - Values are already in mg/L
+vfa_mg_l = record_eff[:, idx_S_ac]  # mg/L (NO conversion needed)
+biomass_mg_l = record_eff[:, idx_X_ac]  # mg/L (NO conversion needed)
+
+# WRONG - Do NOT multiply by 1000
+vfa_wrong = record_eff[:, idx_S_ac] * 1000  # ✗ WRONG - creates 1000× error
+```
+
+**Unit Conversion Reference:**
+- 1 kg/m³ = 1000 mg/L
+- 1 mg/L = 0.001 kg/m³
+
+**Affected Variables:**
+- Time series COD: mg/L
+- Time series VFA (S_ac): mg/L
+- Time series biomass (X_ac): mg/L
+- Stream component concentrations: mg/L (when using `get_component_conc_mg_L()`)
+
+**Where This Was Fixed:**
+- `utils/qsdsan_simulation_sulfur.py:extract_time_series()` - Lines 488-491
+- Added explicit `*_units` fields to time_series dict
+- Added comprehensive docstring notes
+
+**How to Avoid Future Mistakes:**
+1. ALWAYS check the `*_units` field in returned dictionaries
+2. NEVER assume kg/m³ - verify with Codex or source code
+3. Use unit-aware comments: `# mg/L` or `# kg/m³`
+4. Include unit conversion factors explicitly in code: `conc_kg_m3 * 1000  # Convert kg/m³ to mg/L`
+
 ## COMPLETE WORKFLOW - MUST FOLLOW ALL STEPS
 
 **CRITICAL**: When testing the full anaerobic digester design workflow, you MUST follow ALL steps in order. Do NOT skip Step 2 (Codex ADM1 generation) - this is the core innovation of the system.
