@@ -189,11 +189,13 @@ async def run_madm1_simulation(
         logger.info(f"Influent stream created: pH={influent.pH:.2f}")
 
         # 5. Create AnaerobicCSTR with mADM1
-        HRT_days = heuristic_config['digester']['HRT_days']
-        V_liq = Q * HRT_days
+        # For AnMBR systems, use SRT instead of HRT for reactor sizing
+        # The MBR allows biomass retention, so reactor HRT = SRT
+        SRT_days = heuristic_config['digester']['srt_days']
+        V_liq = Q * SRT_days  # Use SRT for volume calculation
         V_gas = V_liq * 0.1  # 10% headspace
 
-        logger.info(f"Creating AnaerobicCSTR: V_liq={V_liq} m3, HRT={HRT_days} days")
+        logger.info(f"Creating AnaerobicCSTR: V_liq={V_liq} m3, SRT={SRT_days} days (AnMBR configuration)")
 
         # CRITICAL FIX: Create custom reactor class that uses dynamic biogas slicing
         # QSDsan's AnaerobicCSTR hardcodes rhos[-3:] but mADM1 has 4 biogas components
@@ -403,7 +405,7 @@ async def run_madm1_simulation(
         logger.info("Running simulation to steady state...")
         sys.simulate(
             state_reset_hook='reset_cache',
-            t_span=(0, 200),  # 200 days max
+            t_span=(0, 500),  # 500 days max for better steady-state convergence
             t_eval=np.arange(0, 200, 10),  # Check every 10 days
             method='BDF'
         )

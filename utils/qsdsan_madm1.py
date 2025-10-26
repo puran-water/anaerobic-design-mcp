@@ -346,7 +346,8 @@ def calc_biogas(state_arr, params, pH):
     # FIX #2a: Use SAME unit conversion as rest of rate function (per Codex analysis 2025-10-24)
     # CRITICAL: Must match unit_conversion at line 819 in rhos_madm1
     # The inconsistent i_mass/chem_MW was causing H2S to be on wrong scale
-    unit_conversion = 1e3 * mass2mol_conversion(cmps)  # kg/m³ → kmol/m³
+    # FIX: Remove extra 1e3 factor - mass2mol_conversion already converts kg/m³ to mol/L
+    unit_conversion = mass2mol_conversion(cmps)  # kg/m³ → mol/L (NOT kmol/m³!)
     S_IS_M = S_IS_kg * unit_conversion[is_idx]
 
     # Codex fix #7: Get temperature-corrected Ka_h2s from params
@@ -868,8 +869,9 @@ def rhos_madm1(state_arr, params, T_op, h=None):
     
     # inhibition factors
     # ******************
-    # Convert kg/m³ (model states) to mol/m³; mass2mol_conversion returns mol/L
-    unit_conversion = 1e3 * mass2mol_conversion(cmps)
+    # Convert kg/m³ (model states) to mol/L
+    # FIX: Remove extra 1e3 factor - mass2mol_conversion already converts kg/m³ to mol/L
+    unit_conversion = mass2mol_conversion(cmps)  # kg/m³ → mol/L (NOT kmol/m³!)
     if T_op == T_base:
         Ka = Kab
         KH = KHb / unit_conversion[[7,8,9,30]]

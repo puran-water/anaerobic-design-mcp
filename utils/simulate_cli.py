@@ -35,17 +35,23 @@ def run_simulation(
     heuristic_config_file: str,
     validate_hrt: bool = True,
     hrt_variation: float = 0.2,
+    check_interval: float = 2,
+    tolerance: float = 1e-3,
     output_file: str = 'simulation_results.json'
 ):
     """
     Run QSDsan ADM1+sulfur simulation from JSON input files.
 
+    Simulations run until TRUE steady state (no time limit).
+
     Args:
         basis_file: Path to basis of design JSON
-        adm1_state_file: Path to ADM1 state JSON (30 components)
+        adm1_state_file: Path to ADM1 state JSON (62 mADM1 components)
         heuristic_config_file: Path to heuristic config JSON
         validate_hrt: Run dual-HRT validation (default True)
         hrt_variation: HRT variation for validation (default 0.2)
+        check_interval: Days between convergence checks (default 2)
+        tolerance: Convergence tolerance in kg/m3/d (default 1e-3)
         output_file: Path to save results JSON
     """
     try:
@@ -92,10 +98,11 @@ def run_simulation(
         logger.info(f"Validate HRT: {validate_hrt}, Variation: ±{hrt_variation*100:.0f}%")
 
         if validate_hrt:
-            # Dual-HRT simulation for robustness check
+            # Dual-HRT simulation for robustness check (runs until convergence, no time limit)
             logger.info("Running dual-HRT validation...")
             results_design, results_check, warnings = run_dual_hrt_simulation(
-                basis, adm1_state, heuristic_config, hrt_variation
+                basis, adm1_state, heuristic_config, hrt_variation,
+                check_interval=check_interval, tolerance=tolerance
             )
 
             # Unpack results
@@ -110,11 +117,12 @@ def run_simulation(
                 for warning in warnings:
                     logger.warning(f"  - {warning}")
         else:
-            # Single simulation at design SRT (for CSTR, SRT = HRT)
+            # Single simulation at design SRT (for CSTR, SRT = HRT, runs until convergence)
             SRT_design = heuristic_config['digester']['srt_days']
-            logger.info(f"Running single simulation at design SRT={SRT_design} days...")
+            logger.info(f"Running single simulation at design SRT={SRT_design} days (no time limit)...")
             sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d, time_series_d = run_simulation_sulfur(
-                basis, adm1_state, SRT_design
+                basis, adm1_state, SRT_design,
+                check_interval=check_interval, tolerance=tolerance
             )
             logger.info(f"Simulation: {status_d} at t={converged_at_d} days")
             warnings = []
@@ -267,6 +275,18 @@ def main():
         help='HRT variation for validation (default: 0.2 = ±20%%)'
     )
     parser.add_argument(
+        '--check-interval',
+        type=float,
+        default=2,
+        help='Days between convergence checks (default: 2, for faster detection)'
+    )
+    parser.add_argument(
+        '--tolerance',
+        type=float,
+        default=1e-3,
+        help='Convergence tolerance in kg/m3/d (default: 1e-3, relaxed from 5e-4 to avoid numerical noise)'
+    )
+    parser.add_argument(
         '--output',
         default='simulation_results.json',
         help='Path to save results JSON (default: simulation_results.json)'
@@ -280,6 +300,8 @@ def main():
         heuristic_config_file=args.heuristic_config,
         validate_hrt=args.validate_hrt,
         hrt_variation=args.hrt_variation,
+        check_interval=args.check_interval,
+        tolerance=args.tolerance,
         output_file=args.output
     )
 

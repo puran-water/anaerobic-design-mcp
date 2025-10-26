@@ -267,7 +267,7 @@ def initialize_62_component_state(adm1_state_62):
     return init_conds
 
 
-def check_steady_state(eff, gas, window=5, tolerance=5e-4):
+def check_steady_state(eff, gas, window=5, tolerance=1e-3):
     """
     Check if system reached pseudo-steady-state.
 
@@ -283,7 +283,8 @@ def check_steady_state(eff, gas, window=5, tolerance=5e-4):
     window : int, optional
         Number of recent time points to check (default 5)
     tolerance : float, optional
-        Maximum acceptable dC/dt in kg/m3/d (default 5e-4, relaxed from 1e-4 per Codex Bug Fix #3)
+        Maximum acceptable dC/dt in kg/m3/d (default 1e-3, relaxed from 5e-4 per Codex
+        recommendation to avoid chasing numerical noise below solver precision)
 
     Returns
     -------
@@ -293,8 +294,10 @@ def check_steady_state(eff, gas, window=5, tolerance=5e-4):
     Notes
     -----
     - Checks COD, VFA (S_ac), and biomass (X_ac) as key indicators
-    - Uses numerical differentiation on last 'window' points
+    - Uses numerical differentiation on last 'window' points with rolling average smoothing
+    - Rolling average reduces BDF solver jitter before gradient calculation
     - Early convergence detection saves computation time
+    - Tolerance relaxed to 1e-3 to avoid numerical noise at true steady state
     """
     try:
         # Check if dynamic tracking is available
@@ -327,20 +330,35 @@ def check_steady_state(eff, gas, window=5, tolerance=5e-4):
         COD_recent = record[recent_indices, idx_COD]
         biomass_recent = record[recent_indices, idx_biomass]
 
+        # Apply rolling average smoothing to reduce BDF solver jitter (per Codex recommendation)
+        # Use simple moving average with window size 3 to smooth numerical noise
+        if len(COD_recent) >= 3:
+            from scipy.ndimage import uniform_filter1d
+            COD_smoothed = uniform_filter1d(COD_recent, size=3, mode='nearest')
+            biomass_smoothed = uniform_filter1d(biomass_recent, size=3, mode='nearest')
+        else:
+            # Not enough points for smoothing, use raw data
+            COD_smoothed = COD_recent
+            biomass_smoothed = biomass_recent
+
         # Calculate dC/dt using numerical differentiation
-        dCOD_dt = np.gradient(COD_recent, t_recent)
-        dBiomass_dt = np.gradient(biomass_recent, t_recent)
+        dCOD_dt = np.gradient(COD_smoothed, t_recent)
+        dBiomass_dt = np.gradient(biomass_smoothed, t_recent)
 
         # Check if all derivatives are below tolerance
         max_dCOD_dt = np.max(np.abs(dCOD_dt))
         max_dBiomass_dt = np.max(np.abs(dBiomass_dt))
 
-        logger.debug(f"Convergence check: max|dCOD/dt|={max_dCOD_dt:.6f}, max|dBiomass/dt|={max_dBiomass_dt:.6f}")
+        # Log convergence status at INFO level (changed from DEBUG to track progress)
+        logger.info(f"Convergence check: max|dCOD/dt|={max_dCOD_dt:.6f} kg/m³/d, "
+                   f"max|dBiomass/dt|={max_dBiomass_dt:.6f} kg/m³/d, tolerance={tolerance} kg/m³/d")
 
         if max_dCOD_dt < tolerance and max_dBiomass_dt < tolerance:
             logger.info(f"System converged: max derivatives below {tolerance}")
             return True
 
+        logger.info(f"Not converged yet (COD: {max_dCOD_dt/tolerance:.1f}× tolerance, "
+                   f"Biomass: {max_dBiomass_dt/tolerance:.1f}× tolerance)")
         return False
 
     except Exception as e:
@@ -348,13 +366,14 @@ def check_steady_state(eff, gas, window=5, tolerance=5e-4):
         return False
 
 
-def run_simulation_to_steady_state(sys, eff, gas, max_time=200,
-                                   check_interval=10, t_step=0.1, tolerance=5e-4):
+def run_simulation_to_steady_state(sys, eff, gas, check_interval=2, t_step=0.1, tolerance=1e-3):
     """
-    Run simulation until steady state or max_time.
+    Run simulation until TRUE steady state (no time limit).
 
     Performs dynamic simulation in intervals, checking for convergence after each.
-    Stops early if pseudo-steady-state is reached, saving computation time.
+    Runs indefinitely until pseudo-steady-state is reached. Modified to eliminate
+    arbitrary time limits - the simulation WILL converge eventually, and we want
+    the actual steady-state values, not values at some arbitrary cutoff time.
 
     Parameters
     ----------
@@ -364,41 +383,54 @@ def run_simulation_to_steady_state(sys, eff, gas, max_time=200,
         Effluent stream (must have dynamic tracking)
     gas : WasteStream
         Biogas stream (must have dynamic tracking)
-    max_time : float, optional
-        Maximum simulation time in days (default 200)
     check_interval : float, optional
-        Days between convergence checks (default 10)
+        Days between convergence checks (default 2, reduced from 20 to detect convergence
+        faster without wasting 10-20 day chunks near steady state)
     t_step : float, optional
         Time step for output in days (default 0.1)
     tolerance : float, optional
-        Convergence tolerance in kg/m3/d (default 1e-4)
+        Convergence tolerance in kg/m3/d (default 1e-3, relaxed from 5e-4 per Codex
+        recommendation to avoid chasing numerical noise below BDF solver precision)
 
     Returns
     -------
     tuple
         (converged_at, status) where:
-        - converged_at: Time in days when converged (or max_time)
-        - status: 'converged' or 'max_time_reached'
+        - converged_at: Time in days when converged
+        - status: 'converged' (always, since we run until convergence)
 
     Notes
     -----
     - Uses BDF method (recommended for stiff ODEs in ADM1)
     - Checks convergence every check_interval days
-    - Returns early if steady state detected
-    - Typical convergence time: 50-150 days for ADM1
+    - NO MAXIMUM TIME LIMIT - runs until convergence
+    - Running to true steady state (dCOD/dt ≈ 0) eliminates need for inventory tracking
+      in methane yield calculations: Y_CH4 = CH4_flow / (COD_in - COD_out)
+    - Typical convergence time: 50-150 days for standard ADM1, but may take 2000-5000 days
+      for systems with high particulate COD inventory requiring equilibration across all
+      62 mADM1 components
+    - If you need a safety limit, impose it at the CLI level, not here
     """
     t_current = 0
 
-    logger.info(f"Starting simulation to steady state (max {max_time} days, checking every {check_interval} days)")
+    logger.info(f"Starting simulation to TRUE steady state (no time limit, checking every {check_interval} days)")
 
-    while t_current < max_time:
-        t_next = min(t_current + check_interval, max_time)
+    # CRITICAL FIX per Codex: Reset caches ONCE before loop, not every iteration
+    # Resetting every iteration causes the simulation to replay the same 2 days forever
+    # because all accumulated state and tracking data gets cleared
+    logger.debug("Resetting system caches once before simulation loop")
+    sys.reset_cache()
+    eff.scope.reset_cache()
+    gas.scope.reset_cache()
+
+    while True:
+        t_next = t_current + check_interval
 
         logger.debug(f"Simulating from t={t_current} to t={t_next} days")
 
         try:
             sys.simulate(
-                state_reset_hook='reset_cache',  # CRITICAL: enables proper ODE solving
+                state_reset_hook=None,  # FIXED: Don't reset - keep accumulated state/data
                 t_span=(t_current, t_next),
                 t_eval=np.arange(t_current, t_next + t_step, t_step),
                 method='BDF'  # Backward Differentiation Formula for stiff ODEs
@@ -411,11 +443,12 @@ def run_simulation_to_steady_state(sys, eff, gas, max_time=200,
 
         # Check for convergence
         if check_steady_state(eff, gas, tolerance=tolerance):
-            logger.info(f"Converged to steady state at t={t_current} days")
+            logger.info(f"Converged to TRUE steady state at t={t_current} days")
             return t_current, 'converged'
 
-    logger.warning(f"Reached max simulation time ({max_time} days) without full convergence")
-    return t_current, 'max_time_reached'
+        # Log progress every 100 days to show we're still working
+        if t_current % 100 == 0:
+            logger.info(f"Progress: t={t_current} days, still approaching steady state...")
 
 
 def extract_time_series(eff, gas):
@@ -531,12 +564,13 @@ def extract_time_series(eff, gas):
     return time_series
 
 
-def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
+def run_simulation_sulfur(basis, adm1_state_62, HRT, check_interval=2, tolerance=1e-3):
     """
-    Run single ADM1+sulfur simulation at specified HRT.
+    Run single ADM1+sulfur simulation at specified HRT until TRUE steady state.
 
     Main simulation function that sets up and runs a dynamic anaerobic digester
-    simulation with the extended ADM1+sulfur model.
+    simulation with the extended ADM1+sulfur model. Runs indefinitely until
+    convergence is detected (no arbitrary time limits).
 
     Parameters
     ----------
@@ -546,23 +580,27 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
         - 'Temp': Temperature (K)
         - Other design parameters
     adm1_state_62 : dict
-        30-component ADM1 state (kg/m3)
-        Must include all 27 ADM1 components + S_SO4, S_IS, X_SRB
+        62-component mADM1 state (kg/m3)
+        Must include all ADM1 components + sulfur biology + P/S/Fe extensions
     HRT : float
         Hydraulic retention time in days
-    simulation_time : float, optional
-        Maximum simulation time in days (default 200)
+    check_interval : float, optional
+        Days between convergence checks (default 2, for faster convergence detection)
+    tolerance : float, optional
+        Convergence tolerance in kg/m3/d (default 1e-3, relaxed from 5e-4 to avoid
+        chasing numerical noise below BDF solver precision)
 
     Returns
     -------
     tuple
-        (sys, inf, eff, gas, converged_at, status) where:
+        (sys, inf, eff, gas, converged_at, status, time_series) where:
         - sys: QSDsan System object
         - inf: Influent WasteStream
         - eff: Effluent WasteStream
         - gas: Biogas WasteStream
         - converged_at: Time converged (days)
-        - status: 'converged' or 'max_time_reached'
+        - status: Always 'converged' (runs until steady state achieved)
+        - time_series: Time series data dict (COD, VFA, biomass over time)
 
     Notes
     -----
@@ -570,9 +608,16 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
     1. Must use set_dynamic_tracker(eff, gas) before simulate()
     2. Must use state_reset_hook='reset_cache' in simulate()
     3. Must initialize sulfur components with non-zero values
-    4. Must run until pseudo-steady-state (not just fixed time)
+    4. Runs indefinitely until TRUE pseudo-steady-state (no time limits)
 
-    Without these, streams won't update and results will be wrong!
+    **Refactored (2025-10-26)**: Eliminated arbitrary max_time parameter. Simulations
+    now run until dCOD/dt ≈ 0, which eliminates need for complex COD inventory tracking
+    in methane yield calculations: Y_CH4 = CH4_flow / (COD_in - COD_out)
+
+    Progress is logged every 100 days to show simulation is still running.
+    Convergence detection uses rolling average smoothing to reduce BDF solver jitter.
+
+    Without these requirements, streams won't update and results will be wrong!
     """
     try:
         Q = basis['Q']
@@ -608,7 +653,8 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
             V_liq=V_liq,
             V_gas=V_gas,
             T=Temp,
-            isdynamic=True  # Enable dynamic simulation
+            isdynamic=True,  # Enable dynamic simulation
+            f_retain=0  # CRITICAL FIX: Set to 0 for true CSTR behavior (no retention)
         )
         # Use algebraic H2 for stability (per Codex recommendation and BSM2 pattern)
         AD.algebraic_h2 = True
@@ -616,9 +662,16 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
 
         # 4. Initialize reactor with validated mADM1 state (62 components)
         logger.info("Initializing reactor with mADM1 state")
-        init_conds = initialize_62_component_state(adm1_state_62)
-        AD.set_init_conc(**init_conds)
-        logger.info(f"Initial S_SO4={init_conds['S_SO4']:.4f}, S_IS={init_conds['S_IS']:.6f}, X_hSRB={init_conds.get('X_hSRB', 0):.4f}")
+        init_conds_kg_m3 = initialize_62_component_state(adm1_state_62)
+
+        # CRITICAL FIX: Convert kg/m³ to mg/L for set_init_conc()
+        # QSDsan's set_init_conc() expects mg/L, but our state is in kg/m³
+        # Without this conversion, initial concentrations are 1000x too low
+        init_conds_mg_L = {k: v * 1000 for k, v in init_conds_kg_m3.items()}  # kg/m³ → mg/L
+        logger.info(f"Unit conversion applied: X_I = {init_conds_kg_m3.get('X_I', 0):.3f} kg/m³ → {init_conds_mg_L.get('X_I', 0):.1f} mg/L")
+
+        AD.set_init_conc(**init_conds_mg_L)
+        logger.info(f"Initial S_SO4={init_conds_kg_m3['S_SO4']:.4f}, S_IS={init_conds_kg_m3['S_IS']:.6f}, X_hSRB={init_conds_kg_m3.get('X_hSRB', 0):.4f} (all kg/m³)")
 
         # 5. Set up dynamic system
         # CRITICAL FIX: Use None for ID to get unique auto-generated ID
@@ -630,13 +683,12 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, simulation_time=200):
         sys.set_dynamic_tracker(eff, gas)
         logger.info("Dynamic tracking enabled for effluent and biogas streams")
 
-        # 6. Run simulation to steady state with early stop
-        logger.info("Running simulation to pseudo-steady-state...")
+        # 6. Run simulation to steady state (no time limit)
+        logger.info("Running simulation to TRUE steady-state (to avoid inventory tracking)...")
         converged_at, status = run_simulation_to_steady_state(
             sys, eff, gas,
-            max_time=simulation_time,
-            check_interval=10,
-            tolerance=1e-4
+            check_interval=check_interval,
+            tolerance=tolerance
         )
 
         logger.info(f"Simulation complete: {status} at t={converged_at} days")
@@ -737,13 +789,16 @@ def assess_robustness(results_design, results_check, threshold=10.0):
     return warnings
 
 
-def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variation=0.2):
+def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variation=0.2,
+                            check_interval=2, tolerance=1e-3):
     """
     Run simulation at design SRT and validation SRT.
 
     Performs two simulations:
     1. At design SRT from heuristic sizing
     2. At design SRT * (1 + hrt_variation) for robustness check
+
+    Both simulations run until TRUE steady state (no time limit).
 
     Parameters
     ----------
@@ -755,6 +810,10 @@ def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variatio
         Heuristic sizing results containing digester SRT
     hrt_variation : float, optional
         Fractional SRT variation for check (default 0.2 = ±20%)
+    check_interval : float, optional
+        Days between convergence checks (default 2)
+    tolerance : float, optional
+        Convergence tolerance in kg/m3/d (default 1e-3)
 
     Returns
     -------
@@ -768,6 +827,8 @@ def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variatio
     -----
     For CSTR without MBR, SRT = HRT by definition (biomass leaves with liquid).
     This dual-SRT approach validates that the design isn't sitting on a performance cliff.
+
+    Simulations run indefinitely until convergence - no arbitrary time limits.
     """
     SRT_design = heuristic_config['digester']['srt_days']
     SRT_check = SRT_design * (1 + hrt_variation)
@@ -776,13 +837,17 @@ def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variatio
     logger.info(f"Design SRT: {SRT_design} days (HRT = SRT for CSTR)")
     logger.info(f"Check SRT: {SRT_check} days (+{hrt_variation*100:.0f}%)")
 
-    # Run at design SRT
+    # Run at design SRT (runs until convergence, no time limit)
     logger.info("Running simulation at design SRT...")
-    results_design = run_simulation_sulfur(basis, adm1_state_62, SRT_design)
+    results_design = run_simulation_sulfur(basis, adm1_state_62, SRT_design,
+                                          check_interval=check_interval,
+                                          tolerance=tolerance)
 
-    # Run at check SRT
+    # Run at check SRT (runs until convergence, no time limit)
     logger.info("Running simulation at check SRT...")
-    results_check = run_simulation_sulfur(basis, adm1_state_62, SRT_check)
+    results_check = run_simulation_sulfur(basis, adm1_state_62, SRT_check,
+                                         check_interval=check_interval,
+                                         tolerance=tolerance)
 
     # Assess robustness
     logger.info("Assessing design robustness...")
