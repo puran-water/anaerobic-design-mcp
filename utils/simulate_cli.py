@@ -37,7 +37,10 @@ def run_simulation(
     hrt_variation: float = 0.2,
     check_interval: float = 2,
     tolerance: float = 1e-3,
-    output_file: str = 'simulation_results.json'
+    output_file: str = 'simulation_results.json',
+    fecl3_dose_mg_L: float = 0,
+    naoh_dose_mg_L: float = 0,
+    na2co3_dose_mg_L: float = 0
 ):
     """
     Run QSDsan ADM1+sulfur simulation from JSON input files.
@@ -53,6 +56,9 @@ def run_simulation(
         check_interval: Days between convergence checks (default 2)
         tolerance: Convergence tolerance in kg/m3/d (default 1e-3)
         output_file: Path to save results JSON
+        fecl3_dose_mg_L: FeCl3 dose in mg/L (default 0 = no dosing)
+        naoh_dose_mg_L: NaOH dose in mg/L (default 0 = no dosing)
+        na2co3_dose_mg_L: Na2CO3 dose in mg/L (default 0 = no dosing)
     """
     try:
         start_time = datetime.now()
@@ -93,6 +99,22 @@ def run_simulation(
             return await get_qsdsan_components()
         components = anyio.run(_load)
         logger.info(f"Components loaded: {len(components)} components available")
+
+        # Log dosing configuration
+        if any([fecl3_dose_mg_L, naoh_dose_mg_L, na2co3_dose_mg_L]):
+            logger.info("Chemical dosing configuration:")
+            if fecl3_dose_mg_L > 0:
+                logger.info(f"  FeCl3: {fecl3_dose_mg_L} mg/L")
+            if naoh_dose_mg_L > 0:
+                logger.info(f"  NaOH: {naoh_dose_mg_L} mg/L")
+            if na2co3_dose_mg_L > 0:
+                logger.info(f"  Na2CO3: {na2co3_dose_mg_L} mg/L")
+
+        # TODO: Pass dosing parameters to run_simulation_sulfur and run_dual_hrt_simulation
+        # These functions need to be updated to:
+        # 1. Import dosing classes from utils.chemical_dosing
+        # 2. Create dosing units before the reactor
+        # 3. Connect: influent -> FeCl3Dosage -> NaOHDosage -> Na2CO3Dosage -> reactor
 
         # Run simulation(s)
         logger.info(f"Validate HRT: {validate_hrt}, Variation: ±{hrt_variation*100:.0f}%")
@@ -287,6 +309,24 @@ def main():
         help='Convergence tolerance in kg/m3/d (default: 1e-3, relaxed from 5e-4 to avoid numerical noise)'
     )
     parser.add_argument(
+        '--fecl3-dose',
+        type=float,
+        default=0,
+        help='FeCl3 dose in mg/L for sulfide/phosphate precipitation (default: 0)'
+    )
+    parser.add_argument(
+        '--naoh-dose',
+        type=float,
+        default=0,
+        help='NaOH dose in mg/L for pH control (default: 0)'
+    )
+    parser.add_argument(
+        '--na2co3-dose',
+        type=float,
+        default=0,
+        help='Na2CO3 dose in mg/L for alkalinity adjustment (default: 0)'
+    )
+    parser.add_argument(
         '--output',
         default='simulation_results.json',
         help='Path to save results JSON (default: simulation_results.json)'
@@ -302,7 +342,10 @@ def main():
         hrt_variation=args.hrt_variation,
         check_interval=args.check_interval,
         tolerance=args.tolerance,
-        output_file=args.output
+        output_file=args.output,
+        fecl3_dose_mg_L=args.fecl3_dose,
+        naoh_dose_mg_L=args.naoh_dose,
+        na2co3_dose_mg_L=args.na2co3_dose
     )
 
     # Exit with appropriate code

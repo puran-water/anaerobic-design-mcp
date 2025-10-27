@@ -114,6 +114,35 @@ def validate_adm1_state_sync(
                         f"deviation: {deviation*100:.1f}%)"
                     )
 
+    # CRITICAL: Validate equilibrium pH using QSDsan's production PCM solver
+    # This prevents "false pass" scenarios where charge balance looks OK
+    # but actual pH during simulation is drastically different (e.g., pH 4.0 vs target 7.0)
+    if 'ph' in user_parameters and user_parameters['ph'] is not None:
+        from utils.codex_validator import qsdsan_equilibrium_ph
+
+        target_ph = user_parameters['ph']
+        equilibrium_ph = qsdsan_equilibrium_ph(adm1_state, temperature_k)
+        ph_deviation = abs(equilibrium_ph - target_ph)
+
+        calculated['equilibrium_ph'] = equilibrium_ph
+
+        deviations['ph'] = {
+            'calculated': round(equilibrium_ph, 2),
+            'target': round(target_ph, 2),
+            'deviation_ph_units': round(ph_deviation, 2)
+        }
+
+        passed = ph_deviation <= 0.5  # Within ±0.5 pH units
+        pass_fail['ph'] = 'PASS' if passed else 'FAIL'
+
+        if not passed:
+            all_valid = False
+            warnings.append(
+                f"pH: {equilibrium_ph:.2f} (target: {target_ph:.2f}, "
+                f"deviation: {ph_deviation:.2f} pH units) - "
+                f"Use utils.codex_validator.validate_adm1_ion_balance() to fix"
+            )
+
     return {
         "valid": all_valid,
         "calculated_parameters": calculated,

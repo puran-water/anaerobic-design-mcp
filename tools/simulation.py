@@ -23,7 +23,10 @@ async def simulate_ad_system_tool(
     validate_hrt: bool = True,
     hrt_variation: float = 0.2,
     costing_method: Optional[str] = None,
-    custom_inputs: Optional[Dict[str, Any]] = None
+    custom_inputs: Optional[Dict[str, Any]] = None,
+    fecl3_dose_mg_L: float = 0,
+    naoh_dose_mg_L: float = 0,
+    na2co3_dose_mg_L: float = 0
 ) -> Dict[str, Any]:
     """
     Simulate anaerobic digester using QSDsan with ADM1+sulfur model.
@@ -42,6 +45,12 @@ async def simulate_ad_system_tool(
         Costing approach (not yet implemented)
     custom_inputs : dict or None, optional
         Custom basis, ADM1 state, and heuristic config
+    fecl3_dose_mg_L : float, optional
+        FeCl3 dose in mg/L for sulfide/phosphate precipitation (default 0)
+    naoh_dose_mg_L : float, optional
+        NaOH dose in mg/L for pH control (default 0)
+    na2co3_dose_mg_L : float, optional
+        Na2CO3 dose in mg/L for alkalinity adjustment (default 0)
 
     Returns
     -------
@@ -150,6 +159,14 @@ async def simulate_ad_system_tool(
 
         if not validate_hrt:
             command_parts.append("--no-validate-hrt")
+
+        # Add dosing parameters if specified
+        if fecl3_dose_mg_L > 0:
+            command_parts.append(f"--fecl3-dose {fecl3_dose_mg_L}")
+        if naoh_dose_mg_L > 0:
+            command_parts.append(f"--naoh-dose {naoh_dose_mg_L}")
+        if na2co3_dose_mg_L > 0:
+            command_parts.append(f"--na2co3-dose {na2co3_dose_mg_L}")
 
         command = " ".join(command_parts)
 

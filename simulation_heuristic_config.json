@@ -2,20 +2,20 @@
   "flowsheet_type": "low_tss_mbr",
   "description": "Anaerobic digester with MBR for biomass retention",
   "digester": {
-    "liquid_volume_m3": 10000.0,
-    "vapor_volume_m3": 1000.0,
-    "total_volume_m3": 11000.0,
-    "srt_days": 30.0,
+    "liquid_volume_m3": 6666.7,
+    "vapor_volume_m3": 666.7,
+    "total_volume_m3": 7333.3,
+    "srt_days": 20.0,
     "mlss_mg_l": 15000.0,
     "type": "AnMBR",
-    "HRT_days": 10.0
+    "HRT_days": 6.67
   },
   "operating_conditions": {
     "temperature_c": 35.0,
     "temperature_k": 308.15,
     "pressure_atm": 1.0,
     "vapor_headspace_fraction": 0.1,
-    "vapor_volume_m3": 1000.0
+    "vapor_volume_m3": 666.7
   },
   "mbr": {
     "required": true,
@@ -41,7 +41,7 @@
     "daily_waste_sludge_m3d": 333.333
   },
   "calculation_details": {
-    "biomass_inventory_kg": 150000.0,
+    "biomass_inventory_kg": 100000.0,
     "biomass_production_kg_d": 5000.0
   },
   "sizing_basis": {
@@ -51,12 +51,12 @@
     "biomass_yield_kg_tss_kg_cod": 0.1,
     "biomass_production_kg_d": 5000.0,
     "steady_state_tss_mg_l": 5000.0,
-    "target_srt_days": 30.0
+    "target_srt_days": 20.0
   },
   "flowsheet_decision": {
     "selected": "low_tss_mbr",
     "reason": "TSS concentration (5000 mg/L) below 10000 mg/L, using MBR to maintain 15000 mg/L MLSS",
     "tss_threshold_mg_l": 10000.0
   },
-  "summary": "Low TSS with MBR configuration selected. Digester volume: 10000 m\u00b3, HRT: 10.0 days, SRT: 30.0 days, MBR area: 8333 m\u00b2"
+  "summary": "Low TSS with MBR configuration selected. Digester volume: 6667 m\u00b3, HRT: 6.7 days, SRT: 20.0 days, MBR area: 8333 m\u00b2"
 }

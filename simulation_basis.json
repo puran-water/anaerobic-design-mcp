@@ -3,5 +3,9 @@
   "Temp": 308.15,
   "cod_mg_l": 50000.0,
   "ph": 7.0,
-  "alkalinity_meq_l": 100.0
+  "alkalinity_meq_l": 50.0,
+  "tss_mg_l": 35000.0,
+  "vss_mg_l": 28000.0,
+  "tkn_mg_l": 2500.0,
+  "tp_mg_l": 500.0
 }

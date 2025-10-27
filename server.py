@@ -204,7 +204,10 @@ async def simulate_ad_system_tool(
     validate_hrt: bool = True,
     hrt_variation: float = 0.2,
     costing_method: str = None,
-    custom_inputs: dict = None
+    custom_inputs: dict = None,
+    fecl3_dose_mg_L: float = 0,
+    naoh_dose_mg_L: float = 0,
+    na2co3_dose_mg_L: float = 0
 ):
     """
     Run QSDsan dynamic simulation with ADM1+sulfur model (30 components).
@@ -214,9 +217,36 @@ async def simulate_ad_system_tool(
     - Performance metrics (yields, inhibition)
     - Sulfur analysis (mass balance, speciation, H2S in biogas)
     - HRT validation (if validate_hrt=True)
+    - Optional chemical dosing (FeCl3, NaOH, Na2CO3)
     """
     from tools.simulation import simulate_ad_system_tool as _impl
-    return await _impl(use_current_state, validate_hrt, hrt_variation, costing_method, custom_inputs)
+    return await _impl(use_current_state, validate_hrt, hrt_variation, costing_method, custom_inputs,
+                      fecl3_dose_mg_L, naoh_dose_mg_L, na2co3_dose_mg_L)
+
+@mcp.tool()
+async def estimate_chemical_dosing(
+    use_current_state: bool = True,
+    custom_params: dict = None,
+    objectives: dict = None
+):
+    """
+    Estimate chemical dosing requirements for anaerobic digester operation.
+
+    Provides stoichiometric estimates for:
+    - FeCl3: Sulfide precipitation (H2S control) and phosphate removal
+    - NaOH: pH adjustment
+    - Na2CO3: Alkalinity supplementation
+
+    Args:
+        use_current_state: Use feedstock from design state (default True)
+        custom_params: Custom parameters (sulfide_mg_L, phosphate_mg_P_L, etc.)
+        objectives: Treatment objectives (sulfide_removal, pH_target, etc.)
+
+    Returns:
+        Dosing recommendations with detailed calculations and rationale
+    """
+    from tools.chemical_dosing import estimate_chemical_dosing_tool as _impl
+    return await _impl(use_current_state, custom_params, objectives)
 
 
 def main():
@@ -225,7 +255,7 @@ def main():
     logger.info("Anaerobic Digester Design MCP Server")
     logger.info("="*60)
     logger.info("")
-    logger.info("Registered tools (9 total):")
+    logger.info("Registered tools (10 total):")
     logger.info("  1. elicit_basis_of_design - Collect design parameters")
     logger.info("  2. load_adm1_state - Load ADM1 state from JSON file")
     logger.info("  3. validate_adm1_state - Validate ADM1 state against composites")
@@ -233,8 +263,9 @@ def main():
     logger.info("  5. check_strong_ion_balance - Check cation/anion electroneutrality")
     logger.info("  6. heuristic_sizing_ad - Size digester and auxiliary equipment")
     logger.info("  7. simulate_ad_system_tool - Run QSDsan ADM1+sulfur simulation")
-    logger.info("  8. get_design_state - View current design state and next steps")
-    logger.info("  9. reset_design - Reset design state for new project")
+    logger.info("  8. estimate_chemical_dosing - Estimate FeCl3/NaOH/Na2CO3 dosing")
+    logger.info("  9. get_design_state - View current design state and next steps")
+    logger.info(" 10. reset_design - Reset design state for new project")
     logger.info("")
     logger.info("Note: Simulation output includes comprehensive stream analysis,")
     logger.info("      process health metrics, and sulfur balance data.")

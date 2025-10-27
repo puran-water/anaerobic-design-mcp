@@ -18,7 +18,7 @@ import numpy as np, qsdsan.processes as pc, qsdsan as qs
 from qsdsan.utils import ospath, data_path
 from qsdsan.processes._adm1 import (
     R,
-    create_adm1_cmps, 
+    create_adm1_cmps,
     ADM1,
     mass2mol_conversion,
     T_correction_factor,
@@ -26,6 +26,8 @@ from qsdsan.processes._adm1 import (
     non_compet_inhibit,
     Hill_inhibit
     )
+# Import thermodynamic functions for mineral precipitation
+from .thermodynamics import calc_saturation_indices
 # from scipy.optimize import brenth
 # from warnings import warn
 
@@ -920,8 +922,31 @@ def rhos_madm1(state_arr, params, T_op, h=None):
     
     # multiple mineral precipitation
     # ******************************
-    SIs = np.maximum(1.0, saturation_index(acts, Ksp))  # should be an array
-    rhos[46:59] = k_cryst * state_arr[47:60] * (SIs**(1/sum_stoichios) - 1)**n_cryst
+    # Calculate real saturation indices using thermodynamics module
+    SI_dict = calc_saturation_indices(state_arr, cmps, pH, T_op, unit_conversion)
+
+    # Map dict to array in correct order (matching state_arr[47:60])
+    # X_CCM, X_ACC, X_ACP, X_HAP, X_DCPD, X_OCP, X_struv, X_newb, X_magn, X_kstruv, X_FeS, X_Fe3PO42, X_AlPO4
+    mineral_names = ['CCM', 'ACC', 'ACP', 'HAP', 'DCPD', 'OCP', 'struv', 'newb', 'magn', 'kstruv', 'FeS', 'Fe3PO42', 'AlPO4']
+    SIs = np.array([SI_dict.get(name, 1.0) for name in mineral_names])
+
+    # CRITICAL FIX (per Codex review): Do NOT clamp SI at 1.0
+    # That prevents dissolution (SI < 1 → negative rate)
+    # The kinetic expression must preserve sign for dissolution
+    X_minerals = state_arr[47:60]
+
+    # Precipitation/dissolution rate: r = k * X * sign(SI-1) * |SI^(1/ν) - 1|^n
+    # n_cryst is even (2), so (SI^(1/ν) - 1)^n is always positive
+    # We must explicitly preserve the sign for dissolution
+    SI_driving_force = SIs**(1/sum_stoichios) - 1  # Positive if SI > 1, negative if SI < 1
+    sign_direction = np.sign(SI_driving_force)  # +1 for precipitation, -1 for dissolution
+    magnitude = np.abs(SI_driving_force)**n_cryst  # Always positive due to even n_cryst
+
+    # Combine: rate = k * X * sign * magnitude
+    rates = k_cryst * X_minerals * sign_direction * magnitude
+
+    # Guard: Prevent dissolution if X_mineral is already near zero
+    rhos[46:59] = np.where(X_minerals > 1e-12, rates, np.maximum(0, rates))
     
     # gas transfer
     # ************
