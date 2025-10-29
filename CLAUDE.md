@@ -80,6 +80,16 @@ mcp__anaerobic-design__heuristic_sizing_ad(
 )
 ```
 
+### Step 4b: Prepare Simulation Files (REQUIRED)
+```python
+# This creates simulation_basis.json, simulation_adm1_state.json, simulation_heuristic_config.json
+mcp__anaerobic-design__simulate_ad_system_tool(
+    use_current_state=True,
+    validate_hrt=True,
+    hrt_variation=0.2
+)
+```
+
 ### Step 5: Simulate (REQUIRED)
 
 **IMPORTANT:**
@@ -87,8 +97,10 @@ mcp__anaerobic-design__heuristic_sizing_ad(
 - Do NOT use backslash line breaks in the command - run as a single line or the command will fail
 
 ```bash
-/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe utils/simulate_cli.py --basis simulation_basis.json --adm1-state adm1_state.json --heuristic-config simulation_heuristic_config.json --hrt-variation 0.2
+/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe utils/simulate_cli.py --basis simulation_basis.json --adm1-state simulation_adm1_state.json --heuristic-config simulation_heuristic_config.json --hrt-variation 0.2
 ```
+
+**Note:** The `simulate_ad_system_tool` in Step 4b creates `simulation_adm1_state.json` with enhanced inoculum (6× methanogen boost). This is different from the original `adm1_state.json`.
 
 **Optional Chemical Dosing Parameters:**
 
