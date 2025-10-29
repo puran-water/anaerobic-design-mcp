@@ -126,59 +126,32 @@ def get_component_conc(stream, component_id, units='mg/L'):
 
 def _calculate_stream_ph(stream):
     """
-    Calculate pH from charge balance using validation solver (gas-phase independent).
+    Calculate stream pH using the production PCM solver.
 
-    Uses Henderson-Hasselbalch equilibrium without assuming gas-liquid equilibrium.
-    This is correct for influent/effluent streams that are not in equilibrium with biogas.
-
-    Parameters
-    ----------
-    stream : WasteStream
-        Stream to calculate pH for
-
-    Returns
-    -------
-    float
-        Calculated pH from charge balance
+    Reuses ``qsdsan_equilibrium_ph`` so results stay consistent with the
+    validator and the dynamic reactor (both rely on the Modified ADM1 PCM).
     """
+    if not hasattr(stream, 'F_vol') or stream.F_vol <= 0:
+        return 7.0
+
     try:
-        from utils.qsdsan_validation_sync import check_charge_balance_sync_lightweight
+        from utils.codex_validator import qsdsan_equilibrium_ph
 
-        # Extract ADM1 state from stream (convert to kg/m³)
-        if not hasattr(stream, 'F_vol') or stream.F_vol == 0:
-            return 7.0  # Default if no flow
-
+        # Convert stream mass flows (kg/hr) to concentrations (kg/m³)
+        F_vol = stream.F_vol
         adm1_state = {}
         for cmp in stream.components:
-            conc_kg_m3 = stream.imass[cmp.ID] / stream.F_vol if stream.F_vol > 0 else 0
-            adm1_state[cmp.ID] = conc_kg_m3
+            if cmp.ID == 'H2O':
+                continue
+            adm1_state[cmp.ID] = stream.imass[cmp.ID] / F_vol
 
-        # Get temperature (K)
-        temperature_k = stream.T if hasattr(stream, 'T') else 308.15
-
-        # Solve for equilibrium pH using charge balance (gas-independent)
-        # Try a reasonable initial pH guess
-        result = check_charge_balance_sync_lightweight(adm1_state, ph=7.0, temperature_k=temperature_k)
-
-        # Use brentq to find pH where charge residual = 0
-        from scipy.optimize import brentq
-
-        def charge_residual(ph_trial):
-            res = check_charge_balance_sync_lightweight(adm1_state, ph_trial, temperature_k)
-            return res['residual_meq_l']
-
-        try:
-            equilibrium_ph = brentq(charge_residual, 4.0, 10.0, xtol=0.01)
-            return round(equilibrium_ph, 2)
-        except ValueError:
-            # If no root found, use the pH with smallest residual
-            residual_low = abs(charge_residual(4.0))
-            residual_high = abs(charge_residual(10.0))
-            return 4.0 if residual_low < residual_high else 10.0
+        temperature_k = getattr(stream, 'T', 308.15)
+        ph = qsdsan_equilibrium_ph(adm1_state, temperature_k)
+        return round(float(ph), 2)
 
     except Exception as e:
-        logger.warning(f"Could not calculate pH from charge balance: {e}")
-        return 7.0  # Fallback to neutral
+        logger.warning(f"Could not calculate equilibrium pH with PCM solver: {e}")
+        return round(float(getattr(stream, '_pH', 7.0)), 2)
 
 
 def _analyze_liquid_stream_core(stream, include_components=False):

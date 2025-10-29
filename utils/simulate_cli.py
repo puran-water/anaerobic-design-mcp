@@ -40,7 +40,8 @@ def run_simulation(
     output_file: str = 'simulation_results.json',
     fecl3_dose_mg_L: float = 0,
     naoh_dose_mg_L: float = 0,
-    na2co3_dose_mg_L: float = 0
+    na2co3_dose_mg_L: float = 0,
+    pH_ctrl: float = None
 ):
     """
     Run QSDsan ADM1+sulfur simulation from JSON input files.
@@ -68,9 +69,17 @@ def run_simulation(
         with open(basis_file, 'r') as f:
             basis = json.load(f)
         with open(adm1_state_file, 'r') as f:
-            adm1_state = json.load(f)
+            adm1_state_raw = json.load(f)
         with open(heuristic_config_file, 'r') as f:
             heuristic_config = json.load(f)
+
+        # Extract numeric values from annotated format [value, unit, explanation]
+        adm1_state = {}
+        for k, v in adm1_state_raw.items():
+            if isinstance(v, (list, tuple)) and len(v) > 0:
+                adm1_state[k] = float(v[0])
+            else:
+                adm1_state[k] = float(v)
 
         logger.info(f"Basis: Q={basis.get('Q', 'N/A')} m3/d, T={basis.get('Temp', 'N/A')} K")
         logger.info(f"ADM1 state: {len(adm1_state)} components")
@@ -100,21 +109,31 @@ def run_simulation(
         components = anyio.run(_load)
         logger.info(f"Components loaded: {len(components)} components available")
 
-        # Log dosing configuration
-        if any([fecl3_dose_mg_L, naoh_dose_mg_L, na2co3_dose_mg_L]):
-            logger.info("Chemical dosing configuration:")
-            if fecl3_dose_mg_L > 0:
-                logger.info(f"  FeCl3: {fecl3_dose_mg_L} mg/L")
-            if naoh_dose_mg_L > 0:
-                logger.info(f"  NaOH: {naoh_dose_mg_L} mg/L")
-            if na2co3_dose_mg_L > 0:
-                logger.info(f"  Na2CO3: {na2co3_dose_mg_L} mg/L")
+        # Convert dose concentrations (mg/L) to flow rates (m3/d)
+        # Assumes dosing solutions with standard commercial concentrations:
+        #   - NaOH: 431.25 kg/m³ S_Na (commercial 50% NaOH)
+        #   - FeCl3: 400.0 kg/m³ S_Fe (commercial 35-42 wt% FeCl3·6H2O)
+        #   - Na2CO3: 106.0 kg/m³ S_Na (soda ash solution)
+        Q_influent = basis.get('Q', 1000)  # m3/d
 
-        # TODO: Pass dosing parameters to run_simulation_sulfur and run_dual_hrt_simulation
-        # These functions need to be updated to:
-        # 1. Import dosing classes from utils.chemical_dosing
-        # 2. Create dosing units before the reactor
-        # 3. Connect: influent -> FeCl3Dosage -> NaOHDosage -> Na2CO3Dosage -> reactor
+        naoh_conc_kg_m3 = 431.25  # Commercial 50% NaOH
+        fecl3_conc_kg_m3 = 400.0  # Commercial 35-42 wt% FeCl3·6H2O solution
+        na2co3_conc_kg_m3 = 106.0  # Soda ash solution
+
+        # Calculate flow rates from target concentrations
+        naoh_flow_m3_d = (naoh_dose_mg_L * Q_influent) / (naoh_conc_kg_m3 * 1000) if naoh_dose_mg_L > 0 else 0
+        fecl3_flow_m3_d = (fecl3_dose_mg_L * Q_influent) / (fecl3_conc_kg_m3 * 1000) if fecl3_dose_mg_L > 0 else 0
+        na2co3_flow_m3_d = (na2co3_dose_mg_L * Q_influent) / (na2co3_conc_kg_m3 * 1000) if na2co3_dose_mg_L > 0 else 0
+
+        # Log dosing configuration
+        if any([fecl3_flow_m3_d, naoh_flow_m3_d, na2co3_flow_m3_d]):
+            logger.info("Chemical dosing configuration:")
+            if naoh_flow_m3_d > 0:
+                logger.info(f"  NaOH: {naoh_dose_mg_L} mg/L target → {naoh_flow_m3_d:.4f} m³/d @ {naoh_conc_kg_m3:.2f} kg/m³")
+            if fecl3_flow_m3_d > 0:
+                logger.info(f"  FeCl3: {fecl3_dose_mg_L} mg/L target → {fecl3_flow_m3_d:.4f} m³/d @ {fecl3_conc_kg_m3:.2f} kg/m³")
+            if na2co3_flow_m3_d > 0:
+                logger.info(f"  Na2CO3: {na2co3_dose_mg_L} mg/L target → {na2co3_flow_m3_d:.4f} m³/d @ {na2co3_conc_kg_m3:.2f} kg/m³")
 
         # Run simulation(s)
         logger.info(f"Validate HRT: {validate_hrt}, Variation: ±{hrt_variation*100:.0f}%")
@@ -124,7 +143,13 @@ def run_simulation(
             logger.info("Running dual-HRT validation...")
             results_design, results_check, warnings = run_dual_hrt_simulation(
                 basis, adm1_state, heuristic_config, hrt_variation,
-                check_interval=check_interval, tolerance=tolerance
+                check_interval=check_interval, tolerance=tolerance, pH_ctrl=pH_ctrl,
+                fixed_naoh_dose_m3_d=naoh_flow_m3_d,
+                fixed_fecl3_dose_m3_d=fecl3_flow_m3_d,
+                fixed_na2co3_dose_m3_d=na2co3_flow_m3_d,
+                naoh_conc_kg_m3=naoh_conc_kg_m3,
+                fecl3_conc_kg_m3=fecl3_conc_kg_m3,
+                na2co3_conc_kg_m3=na2co3_conc_kg_m3
             )
 
             # Unpack results
@@ -144,7 +169,13 @@ def run_simulation(
             logger.info(f"Running single simulation at design SRT={SRT_design} days (no time limit)...")
             sys_d, inf_d, eff_d, gas_d, converged_at_d, status_d, time_series_d = run_simulation_sulfur(
                 basis, adm1_state, SRT_design,
-                check_interval=check_interval, tolerance=tolerance
+                check_interval=check_interval, tolerance=tolerance, pH_ctrl=pH_ctrl,
+                fixed_naoh_dose_m3_d=naoh_flow_m3_d,
+                fixed_fecl3_dose_m3_d=fecl3_flow_m3_d,
+                fixed_na2co3_dose_m3_d=na2co3_flow_m3_d,
+                naoh_conc_kg_m3=naoh_conc_kg_m3,
+                fecl3_conc_kg_m3=fecl3_conc_kg_m3,
+                na2co3_conc_kg_m3=na2co3_conc_kg_m3
             )
             logger.info(f"Simulation: {status_d} at t={converged_at_d} days")
             warnings = []
@@ -239,11 +270,49 @@ def run_simulation(
             }
         }
 
-        # Save results
+        # Save legacy results file (for backward compatibility)
         with open(output_file, 'w') as f:
             json.dump(result, f, indent=2)
+        logger.info(f"Legacy results saved to {output_file} (deprecated)")
 
-        logger.info(f"Results saved to {output_file}")
+        # Generate formatted output files
+        logger.info("Generating formatted output files...")
+        from utils.output_formatters import (
+            calculate_vfa_alkalinity,
+            format_performance_output,
+            format_inhibition_output,
+            format_precipitation_output,
+            format_timeseries_output
+        )
+
+        # Calculate VFA/Alkalinity metrics
+        inf_vfa_alk = calculate_vfa_alkalinity(influent, influent['pH'])
+        eff_vfa_alk = calculate_vfa_alkalinity(effluent, effluent['pH'])
+
+        # Format and save performance output
+        performance_output = format_performance_output(result, inf_vfa_alk, eff_vfa_alk)
+        with open('simulation_performance.json', 'w') as f:
+            json.dump(performance_output, f, indent=2)
+        logger.info("  ✓ simulation_performance.json")
+
+        # Format and save inhibition output
+        inhibition_output = format_inhibition_output(diagnostics)
+        with open('simulation_inhibition.json', 'w') as f:
+            json.dump(inhibition_output, f, indent=2)
+        logger.info("  ✓ simulation_inhibition.json")
+
+        # Format and save precipitation output
+        precipitation_output = format_precipitation_output(diagnostics, effluent)
+        with open('simulation_precipitation.json', 'w') as f:
+            json.dump(precipitation_output, f, indent=2)
+        logger.info("  ✓ simulation_precipitation.json")
+
+        # Format and save timeseries output
+        timeseries_output = format_timeseries_output(result)
+        with open('simulation_timeseries.json', 'w') as f:
+            json.dump(timeseries_output, f, indent=2)
+        logger.info("  ✓ simulation_timeseries.json")
+
         logger.info("=== Simulation Complete ===")
 
         return result
@@ -327,6 +396,12 @@ def main():
         help='Na2CO3 dose in mg/L for alkalinity adjustment (default: 0)'
     )
     parser.add_argument(
+        '--pH-ctrl',
+        type=float,
+        default=None,
+        help='Fix pH at this value (e.g., 7.0) to emulate perfect pH control for diagnostic testing'
+    )
+    parser.add_argument(
         '--output',
         default='simulation_results.json',
         help='Path to save results JSON (default: simulation_results.json)'
@@ -345,7 +420,8 @@ def main():
         output_file=args.output,
         fecl3_dose_mg_L=args.fecl3_dose,
         naoh_dose_mg_L=args.naoh_dose,
-        na2co3_dose_mg_L=args.na2co3_dose
+        na2co3_dose_mg_L=args.na2co3_dose,
+        pH_ctrl=args.pH_ctrl
     )
 
     # Exit with appropriate code

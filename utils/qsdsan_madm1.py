@@ -1464,10 +1464,14 @@ class ModifiedADM1(CompiledProcesses):
 
         # Wrapper to adapt rhos_madm1's 3-argument signature to QSDsan's expected 2-argument signature
         # T_op is retrieved from the reactor temperature during simulation
-        def rhos_wrapper(state_arr, params):
+        # h parameter is optional - used for pH control (passed as kwarg from AnaerobicCSTRmADM1._compile_ODE)
+        # **kwargs captures h without violating QSDsan's 2-argument requirement
+        def rhos_wrapper(state_arr, params, **kwargs):
             # Get T_op from params dict (set by reactor during simulation)
             T_op = params.get('T_op', cls._T_base)
-            return rhos_madm1(state_arr, params, T_op)
+            # Extract h from kwargs (None if not provided)
+            h = kwargs.get('h', None)
+            return rhos_madm1(state_arr, params, T_op, h=h)
 
         self.set_rate_function(rhos_wrapper)
         params_dict = dict(zip(cls._kinetic_params,

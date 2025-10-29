@@ -29,6 +29,9 @@ from utils.qsdsan_madm1 import ModifiedADM1, create_madm1_cmps
 # CODEX FIX: Use custom reactor that supports mADM1's 4 biogas species (CH4, CO2, H2, H2S)
 from utils.qsdsan_reactor_madm1 import AnaerobicCSTRmADM1
 
+# Import inoculum generator for CSTR startup
+from utils.inoculum_generator import generate_inoculum_state
+
 # Import pH calculation if available
 try:
     import sys
@@ -564,7 +567,9 @@ def extract_time_series(eff, gas):
     return time_series
 
 
-def run_simulation_sulfur(basis, adm1_state_62, HRT, check_interval=2, tolerance=1e-3):
+def run_simulation_sulfur(basis, adm1_state_62, HRT, check_interval=2, tolerance=1e-3, pH_ctrl=None,
+                          fixed_naoh_dose_m3_d=0.0, fixed_fecl3_dose_m3_d=0.0, fixed_na2co3_dose_m3_d=0.0,
+                          naoh_conc_kg_m3=431.25, fecl3_conc_kg_m3=400.0, na2co3_conc_kg_m3=106.0):
     """
     Run single ADM1+sulfur simulation at specified HRT until TRUE steady state.
 
@@ -589,6 +594,21 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, check_interval=2, tolerance
     tolerance : float, optional
         Convergence tolerance in kg/m3/d (default 1e-3, relaxed from 5e-4 to avoid
         chasing numerical noise below BDF solver precision)
+    pH_ctrl : float, optional
+        If specified, fixes pH at this value (e.g., 7.0) to emulate perfect pH control.
+        Used for rapid diagnostic testing to rule out alkalinity limitation
+    fixed_naoh_dose_m3_d : float, optional
+        Fixed NaOH dosing rate (m3/d), default 0.0
+    fixed_fecl3_dose_m3_d : float, optional
+        Fixed FeCl3 dosing rate (m3/d), default 0.0
+    fixed_na2co3_dose_m3_d : float, optional
+        Fixed Na2CO3 dosing rate (m3/d), default 0.0
+    naoh_conc_kg_m3 : float, optional
+        NaOH concentration as kg Na+/m³ (default 431.25 = 50% commercial NaOH)
+    fecl3_conc_kg_m3 : float, optional
+        FeCl3 concentration as kg Fe³⁺/m³ (default 100.0)
+    na2co3_conc_kg_m3 : float, optional
+        Na2CO3 concentration as kg Na+/m³ (default 106.0)
 
     Returns
     -------
@@ -628,6 +648,18 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, check_interval=2, tolerance
 
         # 1. Create mADM1 model (use ModifiedADM1 directly - no extend function needed)
         # ModifiedADM1 already has SRB processes, H2S inhibition, and all 62 mADM1 components
+        # CRITICAL FIX: Generate proper inoculum from feedstock composition
+        # Solves "pickling" problem where feedstock biomass (~1 kg/m³) is insufficient
+        # for CSTR startup, causing F/M overload and immediate failure
+        logger.info("="*80)
+        logger.info("INOCULUM GENERATOR - Scaling biomass for CSTR startup")
+        logger.info("="*80)
+        reactor_init_state = generate_inoculum_state(
+            feedstock_state=adm1_state_62,
+            target_biomass_cod_ratio=0.20  # 20% of COD as biomass (typical healthy digester)
+        )
+        logger.info("="*80)
+
         logger.info("Creating mADM1 model (62 components, built-in sulfur biology)")
         madm1_cmps = create_madm1_cmps()
         madm1_model = ModifiedADM1(components=madm1_cmps)
@@ -639,15 +671,52 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, check_interval=2, tolerance
         eff = WasteStream('Effluent', T=Temp)
         gas = WasteStream('Biogas')
 
+        # 2b. Create fixed dosing streams if any doses are specified
+        dosing_streams = []
+        if fixed_naoh_dose_m3_d > 0:
+            naoh = WasteStream('NaOH_Dosing', T=Temp)
+            naoh.set_flow_by_concentration(
+                flow_tot=fixed_naoh_dose_m3_d,
+                concentrations={'S_Na': naoh_conc_kg_m3 * 1000},  # kg/m³ to mg/L
+                units=('m3/d', 'mg/L')
+            )
+            dosing_streams.append(naoh)
+            logger.info(f"Created NaOH dosing stream: {naoh_conc_kg_m3:.2f} kg/m³ S_Na, flow = {fixed_naoh_dose_m3_d:.4f} m³/d")
+
+        if fixed_fecl3_dose_m3_d > 0:
+            fecl3 = WasteStream('FeCl3_Dosing', T=Temp)
+            fecl3.set_flow_by_concentration(
+                flow_tot=fixed_fecl3_dose_m3_d,
+                concentrations={'S_Fe': fecl3_conc_kg_m3 * 1000},  # kg/m³ to mg/L
+                units=('m3/d', 'mg/L')
+            )
+            dosing_streams.append(fecl3)
+            logger.info(f"Created FeCl3 dosing stream: {fecl3_conc_kg_m3:.2f} kg/m³ S_Fe, flow = {fixed_fecl3_dose_m3_d:.4f} m³/d")
+
+        if fixed_na2co3_dose_m3_d > 0:
+            na2co3 = WasteStream('Na2CO3_Dosing', T=Temp)
+            na2co3.set_flow_by_concentration(
+                flow_tot=fixed_na2co3_dose_m3_d,
+                concentrations={'S_Na': na2co3_conc_kg_m3 * 1000},  # kg/m³ to mg/L
+                units=('m3/d', 'mg/L')
+            )
+            dosing_streams.append(na2co3)
+            logger.info(f"Created Na2CO3 dosing stream: {na2co3_conc_kg_m3:.2f} kg/m³ S_Na, flow = {fixed_na2co3_dose_m3_d:.4f} m³/d")
+
+        # Prepare inlet streams list
+        inlet_streams = [inf] + dosing_streams
+
         # 3. Create AnaerobicCSTRmADM1 reactor (supports 4 biogas species: CH4, CO2, H2, H2S)
         V_liq = Q * HRT
         V_gas = V_liq * 0.1  # 10% of liquid volume
 
         logger.info(f"Creating AnaerobicCSTRmADM1: V_liq={V_liq:.1f} m3, V_gas={V_gas:.1f} m3")
         logger.info(f"Biogas species: {madm1_model._biogas_IDs}")
+        logger.info(f"Inlet streams: {len(inlet_streams)} (influent + {len(dosing_streams)} dosing)")
+
         AD = AnaerobicCSTRmADM1(
             'AD',
-            ins=inf,
+            ins=inlet_streams,  # Now includes dosing streams
             outs=(gas, eff),
             model=madm1_model,
             V_liq=V_liq,
@@ -658,11 +727,18 @@ def run_simulation_sulfur(basis, adm1_state_62, HRT, check_interval=2, tolerance
         )
         # Use algebraic H2 for stability (per Codex recommendation and BSM2 pattern)
         AD.algebraic_h2 = True
-        logger.info(f"Reactor configured: algebraic_h2={AD.algebraic_h2}")
 
-        # 4. Initialize reactor with validated mADM1 state (62 components)
-        logger.info("Initializing reactor with mADM1 state")
-        init_conds_kg_m3 = initialize_62_component_state(adm1_state_62)
+        # Compile ODE with pH control if requested (rapid diagnostic test)
+        if pH_ctrl is not None:
+            logger.info(f"DIAGNOSTIC MODE: Fixing pH at {pH_ctrl} to emulate perfect pH control")
+            AD._compile_ODE(algebraic_h2=True, pH_ctrl=pH_ctrl)
+
+        logger.info(f"Reactor configured: algebraic_h2={AD.algebraic_h2}, pH_ctrl={pH_ctrl}, fixed dosing streams={len(dosing_streams)}")
+
+        # 4. Initialize reactor with INOCULUM state (NOT feedstock!)
+        # Use reactor_init_state (scaled biomass) instead of adm1_state_62 (feedstock)
+        logger.info("Initializing reactor with INOCULUM state (scaled biomass)")
+        init_conds_kg_m3 = initialize_62_component_state(reactor_init_state)
 
         # CRITICAL FIX: Convert kg/m³ to mg/L for set_init_conc()
         # QSDsan's set_init_conc() expects mg/L, but our state is in kg/m³
@@ -790,7 +866,9 @@ def assess_robustness(results_design, results_check, threshold=10.0):
 
 
 def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variation=0.2,
-                            check_interval=2, tolerance=1e-3):
+                            check_interval=2, tolerance=1e-3, pH_ctrl=None,
+                            fixed_naoh_dose_m3_d=0.0, fixed_fecl3_dose_m3_d=0.0, fixed_na2co3_dose_m3_d=0.0,
+                            naoh_conc_kg_m3=431.25, fecl3_conc_kg_m3=400.0, na2co3_conc_kg_m3=106.0):
     """
     Run simulation at design SRT and validation SRT.
 
@@ -814,6 +892,20 @@ def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variatio
         Days between convergence checks (default 2)
     tolerance : float, optional
         Convergence tolerance in kg/m3/d (default 1e-3)
+    pH_ctrl : float, optional
+        If specified, fixes pH at this value (e.g., 7.0) to emulate perfect pH control
+    fixed_naoh_dose_m3_d : float, optional
+        Fixed NaOH dosing flow rate in m³/d (default 0)
+    fixed_fecl3_dose_m3_d : float, optional
+        Fixed FeCl3 dosing flow rate in m³/d (default 0)
+    fixed_na2co3_dose_m3_d : float, optional
+        Fixed Na2CO3 dosing flow rate in m³/d (default 0)
+    naoh_conc_kg_m3 : float, optional
+        NaOH solution concentration in kg/m³ S_Na (default 431.25 = 50% NaOH)
+    fecl3_conc_kg_m3 : float, optional
+        FeCl3 solution concentration in kg/m³ S_Fe (default 100.0)
+    na2co3_conc_kg_m3 : float, optional
+        Na2CO3 solution concentration in kg/m³ S_Na (default 106.0)
 
     Returns
     -------
@@ -841,13 +933,27 @@ def run_dual_hrt_simulation(basis, adm1_state_62, heuristic_config, hrt_variatio
     logger.info("Running simulation at design SRT...")
     results_design = run_simulation_sulfur(basis, adm1_state_62, SRT_design,
                                           check_interval=check_interval,
-                                          tolerance=tolerance)
+                                          tolerance=tolerance,
+                                          pH_ctrl=pH_ctrl,
+                                          fixed_naoh_dose_m3_d=fixed_naoh_dose_m3_d,
+                                          fixed_fecl3_dose_m3_d=fixed_fecl3_dose_m3_d,
+                                          fixed_na2co3_dose_m3_d=fixed_na2co3_dose_m3_d,
+                                          naoh_conc_kg_m3=naoh_conc_kg_m3,
+                                          fecl3_conc_kg_m3=fecl3_conc_kg_m3,
+                                          na2co3_conc_kg_m3=na2co3_conc_kg_m3)
 
     # Run at check SRT (runs until convergence, no time limit)
     logger.info("Running simulation at check SRT...")
     results_check = run_simulation_sulfur(basis, adm1_state_62, SRT_check,
                                          check_interval=check_interval,
-                                         tolerance=tolerance)
+                                         tolerance=tolerance,
+                                         pH_ctrl=pH_ctrl,
+                                         fixed_naoh_dose_m3_d=fixed_naoh_dose_m3_d,
+                                         fixed_fecl3_dose_m3_d=fixed_fecl3_dose_m3_d,
+                                         fixed_na2co3_dose_m3_d=fixed_na2co3_dose_m3_d,
+                                         naoh_conc_kg_m3=naoh_conc_kg_m3,
+                                         fecl3_conc_kg_m3=fecl3_conc_kg_m3,
+                                         na2co3_conc_kg_m3=na2co3_conc_kg_m3)
 
     # Assess robustness
     logger.info("Assessing design robustness...")

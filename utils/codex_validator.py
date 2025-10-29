@@ -97,10 +97,19 @@ def validate_adm1_ion_balance(
     ph_tolerance: float = 0.5
 ) -> Dict[str, Any]:
     """
-    Validate ADM1 state charge balance using QSDsan's equilibrium pH solver.
+    Validate ADM1 state pH using QSDsan's equilibrium pH solver.
 
     This is the CRITICAL validation that prevents "false pass" scenarios where
     simple electroneutrality checks claim pH 6.5 but QSDsan calculates pH 4.0.
+
+    The PCM solver enforces electroneutrality by construction (finds pH where
+    charge balance = 0), so a separate charge balance check is redundant.
+
+    Per Codex analysis (2025-10-27): Manual charge balance checks fail due to:
+    - VFAs stored on COD basis (need mass2mol_conversion, not raw MW)
+    - Temperature-corrected pKa values (35°C not 25°C)
+    - Complex phosphate speciation (HPO4²⁻/H2PO4⁻)
+    Better to rely solely on PCM solver's pH calculation.
 
     Args:
         adm1_state: Dictionary of ADM1 component concentrations (kg/m³)
@@ -116,10 +125,6 @@ def validate_adm1_ion_balance(
             'target_ph': float,             # User-specified target
             'ph_deviation': float,          # abs(equilibrium - target)
             'ph_deviation_percent': float,  # Deviation as % of target
-            'cations_meq_l': float,         # Total cations in meq/L
-            'anions_meq_l': float,          # Total anions in meq/L
-            'imbalance_meq_l': float,       # abs(cations - anions)
-            'imbalance_percent': float,     # Imbalance as % of total
             'pass': bool,                   # True if within tolerances
             'warnings': list[str]           # Actionable warning messages
         }
@@ -141,35 +146,29 @@ def validate_adm1_ion_balance(
 
     Notes:
         - Uses qsdsan_equilibrium_ph() for accurate pH calculation
-        - Validates pH tolerance (default ±0.5 pH units)
-        - Checks charge balance (should be <5% imbalance)
+        - pH validation implicitly validates charge balance (PCM enforces electroneutrality)
         - Provides actionable warnings for common mistakes
         - This is the validation Codex MUST use in .codex/AGENTS.md
     """
     temperature_k = temperature_c + 273.15
 
     # Calculate equilibrium pH using production solver
+    # The PCM solver enforces electroneutrality, so if it returns a pH,
+    # charge balance is automatically satisfied
     equilibrium_ph = qsdsan_equilibrium_ph(adm1_state, temperature_k)
 
     # Calculate pH deviation
     ph_deviation = abs(equilibrium_ph - target_ph)
     ph_deviation_percent = (ph_deviation / target_ph) * 100
 
-    # Calculate charge balance (cations vs anions)
-    cations_meq_l, anions_meq_l = _calculate_charge_balance(adm1_state, equilibrium_ph)
-    imbalance_meq_l = abs(cations_meq_l - anions_meq_l)
-    total_charge = (cations_meq_l + anions_meq_l) / 2
-    imbalance_percent = (imbalance_meq_l / total_charge * 100) if total_charge > 0 else 0.0
-
-    # Determine pass/fail
-    ph_pass = ph_deviation <= ph_tolerance
-    charge_pass = imbalance_percent <= 5.0  # Within 5% is acceptable
-    overall_pass = ph_pass and charge_pass
+    # Determine pass/fail based on pH only
+    # Charge balance is implicitly validated by the PCM solver
+    overall_pass = ph_deviation <= ph_tolerance
 
     # Generate warnings
     warnings = []
 
-    if not ph_pass:
+    if not overall_pass:
         warnings.append(
             f"pH deviation: {ph_deviation:.2f} units (target: {target_ph:.1f}, "
             f"calculated: {equilibrium_ph:.2f})"
@@ -203,12 +202,6 @@ def validate_adm1_ion_balance(
                 "to lower pH."
             )
 
-    if not charge_pass:
-        warnings.append(
-            f"Charge imbalance: {imbalance_percent:.1f}% "
-            f"(cations: {cations_meq_l:.1f} meq/L, anions: {anions_meq_l:.1f} meq/L)"
-        )
-
     # Add alkalinity check if target provided
     if target_alkalinity_meq_l is not None:
         calculated_alk = _estimate_alkalinity(adm1_state, equilibrium_ph)
@@ -224,81 +217,9 @@ def validate_adm1_ion_balance(
         'target_ph': round(target_ph, 2),
         'ph_deviation': round(ph_deviation, 2),
         'ph_deviation_percent': round(ph_deviation_percent, 1),
-        'cations_meq_l': round(cations_meq_l, 1),
-        'anions_meq_l': round(anions_meq_l, 1),
-        'imbalance_meq_l': round(imbalance_meq_l, 1),
-        'imbalance_percent': round(imbalance_percent, 1),
         'pass': overall_pass,
         'warnings': warnings
     }
-
-
-def _calculate_charge_balance(
-    state_dict: Dict[str, float],
-    pH: float
-) -> tuple:
-    """
-    Calculate total cations and anions in meq/L.
-
-    Uses Henderson-Hasselbalch to determine speciation of weak acids
-    at the given pH.
-
-    Returns:
-        (cations_meq_l, anions_meq_l)
-    """
-    # Molecular weights (g/mol)
-    MW = {
-        'Na': 22.99, 'K': 39.10, 'Mg': 24.31, 'Ca': 40.08,
-        'Fe': 55.845, 'Al': 26.98, 'Cl': 35.45, 'S': 32.06,
-        'N': 14.01, 'C': 12.01, 'P': 30.97
-    }
-
-    # Cations (meq/L = mmol/L × charge)
-    cations = 0.0
-    cations += state_dict.get('S_Na', 0.0) / MW['Na'] * 1000 * 1  # Na+ (1+)
-    cations += state_dict.get('S_K', 0.0) / MW['K'] * 1000 * 1    # K+ (1+)
-    cations += state_dict.get('S_Mg', 0.0) / MW['Mg'] * 1000 * 2  # Mg²+ (2+)
-    cations += state_dict.get('S_Ca', 0.0) / MW['Ca'] * 1000 * 2  # Ca²+ (2+)
-    cations += state_dict.get('S_Fe2', 0.0) / MW['Fe'] * 1000 * 2  # Fe²+ (2+)
-    cations += state_dict.get('S_Fe3', 0.0) / MW['Fe'] * 1000 * 3  # Fe³+ (3+)
-    cations += state_dict.get('S_Al', 0.0) / MW['Al'] * 1000 * 3   # Al³+ (3+)
-
-    # NH4+ (from S_IN at given pH, pKa ~ 9.25)
-    S_IN = state_dict.get('S_IN', 0.0)
-    h_ion = 10**(-pH)
-    Ka_nh = 10**(-9.25)
-    nh4_fraction = h_ion / (Ka_nh + h_ion)
-    cations += S_IN / MW['N'] * 1000 * nh4_fraction * 1  # NH4+ (1+)
-
-    # Anions (meq/L = mmol/L × charge)
-    anions = 0.0
-    anions += state_dict.get('S_Cl', 0.0) / MW['Cl'] * 1000 * 1  # Cl- (1-)
-
-    # SO4²- (2-)
-    anions += state_dict.get('S_SO4', 0.0) / MW['S'] * 1000 * 2  # SO4²- (2-)
-
-    # HCO3- (from S_IC at given pH, pKa1 ~ 6.35)
-    S_IC = state_dict.get('S_IC', 0.0)
-    Ka_co2 = 10**(-6.35)
-    hco3_fraction = Ka_co2 / (Ka_co2 + h_ion)
-    anions += S_IC / MW['C'] * 1000 * hco3_fraction * 1  # HCO3- (1-)
-
-    # VFAs (assume fully ionized at pH > 4)
-    anions += state_dict.get('S_ac', 0.0) / 59.0 * 1000 * 1   # Acetate (1-)
-    anions += state_dict.get('S_pro', 0.0) / 73.0 * 1000 * 1  # Propionate (1-)
-    anions += state_dict.get('S_bu', 0.0) / 87.0 * 1000 * 1   # Butyrate (1-)
-    anions += state_dict.get('S_va', 0.0) / 101.0 * 1000 * 1  # Valerate (1-)
-
-    # HPO4²- (from S_IP, assume fully deprotonated, 2-)
-    anions += state_dict.get('S_IP', 0.0) / MW['P'] * 1000 * 2  # HPO4²- (2-)
-
-    # HS- (from S_IS at given pH, pKa ~ 7.0)
-    S_IS = state_dict.get('S_IS', 0.0)
-    Ka_h2s = 10**(-7.0)
-    hs_fraction = Ka_h2s / (Ka_h2s + h_ion)
-    anions += S_IS / MW['S'] * 1000 * hs_fraction * 1  # HS- (1-)
-
-    return cations, anions
 
 
 def _estimate_alkalinity(state_dict: Dict[str, float], pH: float) -> float:

@@ -117,8 +117,12 @@ class AnaerobicCSTRmADM1(AnaerobicCSTR):
 
         if pH_ctrl:
             _params = self.model.rate_function.params
-            hydrogen = 10 ** (-pH_ctrl)
-            _f_rhos = lambda state_arr: self.model.flex_rhos(state_arr, _params, h=hydrogen)
+            # CRITICAL FIX (per Codex): Must call rate_function.function() to bypass MultiKinetics wrapper
+            # MultiKinetics.__call__ only accepts (state_arr), so we need the underlying callable
+            # Also, h must be a tuple (pH, nh3, co2, acts) from PCM solver, not a scalar
+            # For pH control diagnostic mode, we create a simplified tuple with fixed pH
+            hydrogen_tuple = (pH_ctrl, 0.001, 0.001, None)  # (pH, nh3_approx, co2_approx, acts=None)
+            _f_rhos = lambda state_arr: self.model.rate_function.function(state_arr, _params, h=hydrogen_tuple)
         else:
             _f_rhos = self.model.rate_function
         _f_param = self.model.params_eval
@@ -182,6 +186,7 @@ class AnaerobicCSTRmADM1(AnaerobicCSTR):
             S_ins = QC_ins[:, :-1] * 1e-3  # mg/L to kg/m3
             Q = sum(Q_ins)
             S_in = Q_ins @ S_ins / Q
+
             if hasexo:
                 exo_vars = f_exovars(t)
                 QC = np.append(QC, exo_vars)
@@ -198,8 +203,13 @@ class AnaerobicCSTRmADM1(AnaerobicCSTR):
             q_gas = f_qgas(gas_rhos, S_gas, T)
             _dstate[n_cmps:(n_cmps + n_gas)] = - q_gas * S_gas / V_gas \
                 + gas_rhos * V_liq / V_gas * gas_mass2mol_conversion
-            _dstate[-1] = 0.
+
+            # Q derivative (always at n_cmps + n_gas index)
+            _dstate[n_cmps + n_gas] = 0.
+
+            # H2 handling (algebraic constraint)
             update_h2_dstate(_dstate)
+
             _update_dstate()
 
         self._ODE = dy_dt

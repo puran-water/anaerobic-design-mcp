@@ -127,16 +127,21 @@ mcp__anaerobic-design__heuristic_sizing_ad(
 **Step 4: Run QSDsan simulation**
 
 ```bash
-# Execute simulation (50-150 seconds)
-python utils/simulate_cli.py \
-    --basis simulation_basis.json \
-    --adm1-state adm1_state.json \
-    --heuristic-config simulation_heuristic_config.json \
-    --hrt-variation 0.2
+# Execute simulation (300-600 seconds to reach TRUE steady state)
+python utils/simulate_cli.py --basis simulation_basis.json --adm1-state adm1_state.json --heuristic-config simulation_heuristic_config.json --hrt-variation 0.2
 
-# View results
-cat simulation_results.json | jq '.performance_metrics'
-cat simulation_results.json | jq '.biogas'
+# Parse results (token-efficient: 7 KB vs 159 KB full file)
+python utils/parse_simulation_results.py
+```
+
+**Output**: Three comprehensive tables showing:
+1. Performance metrics (COD removal, methane yield, biomass yields)
+2. Inhibition analysis (pH, ammonia, H2, H2S effects)
+3. Precipitation metrics (struvite, HAP, FeS, etc.)
+
+**Optional chemical dosing** (if needed for pH control):
+```bash
+python utils/simulate_cli.py --basis simulation_basis.json --adm1-state adm1_state.json --heuristic-config simulation_heuristic_config.json --hrt-variation 0.2 --naoh-dose 2840 --fecl3-dose 100
 ```
 
 ## Available MCP Tools
@@ -163,25 +168,28 @@ cat simulation_results.json | jq '.biogas'
 
 ```
 anaerobic-design-mcp/
-├── server.py                  # FastMCP server (13 tools)
-├── tools/                     # MCP tool implementations
-│   ├── basis_of_design.py    # Parameter collection
-│   ├── validation.py         # ADM1 state validation
-│   ├── sizing.py             # Heuristic sizing
-│   └── simulation.py         # QSDsan integration
+├── server.py                        # FastMCP server (13 tools)
+├── tools/                           # MCP tool implementations
+│   ├── basis_of_design.py          # Parameter collection
+│   ├── validation.py               # ADM1 state validation
+│   ├── sizing.py                   # Heuristic sizing
+│   └── simulation.py               # QSDsan integration
 ├── utils/
-│   ├── qsdsan_madm1.py       # 62-component mADM1 model
-│   ├── qsdsan_reactor_madm1.py    # Custom AnaerobicCSTR
-│   ├── qsdsan_simulation_madm1.py # Simulation engine
-│   └── validate_cli.py       # CLI validation tools
+│   ├── qsdsan_madm1.py             # 62-component mADM1 model
+│   ├── qsdsan_reactor_madm1.py     # Custom AnaerobicCSTR
+│   ├── qsdsan_simulation_sulfur.py # Simulation engine
+│   ├── inoculum_generator.py       # Enhanced inoculum (6× methanogen boost) ⭐
+│   ├── parse_simulation_results.py # Token-efficient result parser ⭐
+│   ├── validate_cli.py             # CLI validation tools
+│   └── simulate_cli.py             # CLI simulation wrapper
 ├── core/
-│   └── state.py              # Design state management
-└── docs/                     # Complete documentation
-    ├── INDEX.md              # Navigation hub
-    ├── architecture/         # System design
-    ├── bugs/                 # Bug tracking
-    ├── development/          # Refactoring history
-    └── diagnostics/          # Analysis guides
+│   └── state.py                    # Design state management
+└── docs/                           # Complete documentation
+    ├── INDEX.md                    # Navigation hub
+    ├── architecture/               # System design
+    ├── bugs/                       # Bug tracking
+    ├── development/                # Refactoring history
+    └── diagnostics/                # Analysis guides
 ```
 
 ## Production Readiness
@@ -196,10 +204,15 @@ anaerobic-design-mcp/
 
 ### Critical Fixes Applied
 
-1. **pH Solver Bugs** (2025-10-21): Fixed 10^29× error in Ka values, restored pH to 6.7-7.5 range
-2. **Production PCM** (2025-10-18): 9 fixes for complete charge balance with all ionic species
-3. **1000× Unit Error** (2025-10-21): Fixed gas transfer units, restored methane production
-4. **QSDsan Alignment** (2025-10-22): Eliminated divergence from upstream conventions
+1. **Enhanced Inoculum (6× Methanogen Boost)** (2025-10-29): CRITICAL FIX for pH collapse during startup
+   - Doubled methanogen boost factor from 3× → 6× in `utils/inoculum_generator.py`
+   - Prevents VFA accumulation and pH drop from 7.0 → 4.8
+   - Enables stable operation WITHOUT chemical supplementation (NaOH, Na2CO3)
+   - Validated through comparative simulations: 3× boost = FAILED, 6× boost = SUCCESS
+2. **pH Solver Bugs** (2025-10-21): Fixed 10^29× error in Ka values, restored pH to 6.7-7.5 range
+3. **Production PCM** (2025-10-18): 9 fixes for complete charge balance with all ionic species
+4. **1000× Unit Error** (2025-10-21): Fixed gas transfer units, restored methane production
+5. **QSDsan Alignment** (2025-10-22): Eliminated divergence from upstream conventions
 
 See [docs/bugs/CRITICAL_FIXES.md](docs/bugs/CRITICAL_FIXES.md) for details.
 
@@ -255,6 +268,8 @@ If you use this server in research, please cite:
 **Current Version**: 0.1.0 (Production-Ready)
 
 **Recent Updates**:
+- 2025-10-29: Enhanced inoculum (6× methanogen boost) - CRITICAL FIX for startup stability
+- 2025-10-29: Token-efficient result parser (95% reduction: 7 KB vs 159 KB)
 - 2025-10-26: Comprehensive documentation consolidation
 - 2025-10-22: QSDsan convention alignment
 - 2025-10-21: Critical pH and unit conversion fixes
@@ -265,4 +280,4 @@ See [docs/development/REFACTORING_HISTORY.md](docs/development/REFACTORING_HISTO
 
 ---
 
-**Last Updated**: 2025-10-26
+**Last Updated**: 2025-10-29

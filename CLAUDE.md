@@ -1,85 +1,18 @@
-# Claude Code System Prompt - Anaerobic Digester Design MCP
+# AI Agent Instructions - Anaerobic Digester Design Workflow
 
-## CRITICAL INSTRUCTIONS - MUST FOLLOW
+## MCP Tools Available
 
-### PAUSE POINT REQUIREMENTS
-**YOU MUST PAUSE before testing MCP tools after ANY of the following:**
-1. Refactoring or modifying MCP tool implementations
-2. Changing tool function signatures or parameters
-3. Modifying validation logic or state handling
-4. Implementing fixes that affect tool behavior
-5. Making changes to the MCP server code
+- **anaerobic-design MCP**: Main server (basis of design, sizing, simulation)
+- **ADM1-State-Variable-Estimator MCP**: Codex server for mADM1 state generation (GPT-5)
 
-**How to PAUSE correctly:**
-```python
-print("\n" + "="*80)
-print("PAUSE POINT - MCP Tool Testing")
-print("="*80)
-print("Changes made:")
-print("  - [List each change]")
-print("\nReady to test MCP tool: [tool_name]")
-print("Press Enter to continue...")
-input()  # WAIT for user confirmation
-```
+## Complete Workflow (DO NOT SKIP STEPS)
 
-**NEVER skip the pause - the user may need to:**
-- Restart the MCP server
-- Review changes before testing
-- Prepare monitoring/logging
-- Ensure the environment is ready
-
-## MCP Servers Available
-
-Two MCP servers work together in this project:
-1. **anaerobic-design**: Main server with tools for basis of design, sizing, simulation
-2. **ADM1-State-Variable-Estimator**: Codex-based server for mADM1 state generation (GPT-5, high reasoning effort)
-
-## CRITICAL UNITS DOCUMENTATION - MUST REMEMBER
-
-### QSDsan Time Series Data Units (**VERIFIED via Codex**)
-
-**ALL concentrations from `stream.scope.record` are in mg/L, NOT kg/m³**
-
-```python
-# CORRECT - Values are already in mg/L
-vfa_mg_l = record_eff[:, idx_S_ac]  # mg/L (NO conversion needed)
-biomass_mg_l = record_eff[:, idx_X_ac]  # mg/L (NO conversion needed)
-
-# WRONG - Do NOT multiply by 1000
-vfa_wrong = record_eff[:, idx_S_ac] * 1000  # ✗ WRONG - creates 1000× error
-```
-
-**Unit Conversion Reference:**
-- 1 kg/m³ = 1000 mg/L
-- 1 mg/L = 0.001 kg/m³
-
-**Affected Variables:**
-- Time series COD: mg/L
-- Time series VFA (S_ac): mg/L
-- Time series biomass (X_ac): mg/L
-- Stream component concentrations: mg/L (when using `get_component_conc_mg_L()`)
-
-**Where This Was Fixed:**
-- `utils/qsdsan_simulation_sulfur.py:extract_time_series()` - Lines 488-491
-- Added explicit `*_units` fields to time_series dict
-- Added comprehensive docstring notes
-
-**How to Avoid Future Mistakes:**
-1. ALWAYS check the `*_units` field in returned dictionaries
-2. NEVER assume kg/m³ - verify with Codex or source code
-3. Use unit-aware comments: `# mg/L` or `# kg/m³`
-4. Include unit conversion factors explicitly in code: `conc_kg_m3 * 1000  # Convert kg/m³ to mg/L`
-
-## COMPLETE WORKFLOW - MUST FOLLOW ALL STEPS
-
-**CRITICAL**: When testing the full anaerobic digester design workflow, you MUST follow ALL steps in order. Do NOT skip Step 2 (Codex ADM1 generation) - this is the core innovation of the system.
-
-### Step 0: Reset Design State
+### Step 0: Reset
 ```python
 mcp__anaerobic-design__reset_design()
 ```
 
-### Step 1: Collect Basis of Design Parameters
+### Step 1: Collect Parameters
 ```python
 mcp__anaerobic-design__elicit_basis_of_design(
     parameter_group="all",
@@ -97,76 +30,49 @@ mcp__anaerobic-design__elicit_basis_of_design(
 )
 ```
 
-### Step 2: Generate ADM1 State Using Codex MCP ⚠️ CRITICAL STEP
-
-**This is the most important step - do NOT skip it!**
-
-Call the Codex MCP server to generate all 62 mADM1 state variables from feedstock description:
-
+### Step 2: Generate ADM1 State via Codex (CRITICAL - DO NOT SKIP)
 ```python
 mcp__ADM1-State-Variable-Estimator__codex(
-    prompt=f"""
-Generate complete mADM1 (Modified ADM1) state variables for the following feedstock.
-
-## Feedstock Description
-Type: High-strength municipal wastewater sludge
-Source: Primary and waste activated sludge blend
-Characteristics: Thick, particle-rich suspension
-
-## Measured Bulk Parameters
-- Flow rate: 1000 m³/d
-- COD: 50,000 mg/L
-- TSS: 35,000 mg/L
-- VSS: 28,000 mg/L (VSS/TSS = 0.80)
-- TKN: 2,500 mg-N/L
-- TP: 500 mg-P/L
-- pH: 7.0
-- Alkalinity: 50 meq/L
-- Temperature: 35°C
-
-## Required Output
-
-Generate a complete JSON file with ALL 62 mADM1 state variables (indexes 0-61) as specified in your training.
-
-Save the output to: ./adm1_state.json
-
-Format as:
-{{
-  "S_su": value_in_kg_m3,
-  "S_aa": value_in_kg_m3,
-  ...all 62 components...
-  "S_Cl": value_in_kg_m3
-}}
-
-Ensure the state vector:
-1. Matches the measured bulk parameters (COD, TSS, VSS, TKN, TP)
-2. Represents realistic high-strength sludge composition
-3. Includes all P/S/Fe extension components
-4. Has proper charge balance (cations vs anions)
-""",
+    prompt="Generate complete mADM1 (Modified ADM1) state variables...",
     cwd="/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp"
 )
 ```
 
-**After Codex completes**, the ADM1 state will be in `./adm1_state.json`. Load it:
+#### For Multi-Turn Codex Conversations (ONLY after ADM1-State-Variable-Estimator responds):
+If you need to reply to the Codex agent, follow this procedure to find the conversation ID:
 
+a. After making the initial codex call, retrieve the session ID from the Codex sessions directory
+b. The sessions are stored in the MCP server project root: `.codex/sessions/YYYY/MM/DD/` (use today's date)
+c. Find the most recent file by modification time:
+   ```bash
+   ls -lt .codex/sessions/YYYY/MM/DD/*.jsonl | head -1
+   ```
+d. Extract the session ID from the filename: The format is `rollout-YYYY-MM-DDTHH-MM-SS-[SESSION_ID].jsonl`
+   - Example: `rollout-2025-09-10T12-35-31-670d90ae-4ff6-4a50-bcea-011d6ab64dbe.jsonl`
+   - Session ID: `670d90ae-4ff6-4a50-bcea-011d6ab64dbe`
+e. Verify it's the correct session by reading the file and checking for your initial prompt
+f. Use codex-reply with parameter `conversationId` (NOT `session_id`) set to the extracted UUID:
+   ```python
+   mcp__ADM1-State-Variable-Estimator__codex-reply(
+       conversationId="670d90ae-4ff6-4a50-bcea-011d6ab64dbe",
+       prompt="Your follow-up message..."
+   )
+   ```
+
+Then load:
 ```python
 mcp__anaerobic-design__load_adm1_state(file_path="./adm1_state.json")
 ```
 
-### Step 3: Validate ADM1 State
-
-Run validation to ensure Codex-generated state matches targets:
-
+### Step 3: Validate
 ```bash
 python utils/validate_cli.py validate \
     --adm1-state adm1_state.json \
-    --user-params '{"cod_mg_l": 50000, "tss_mg_l": 35000, "vss_mg_l": 28000, "tkn_mg_l": 2500, "tp_mg_l": 500, "ph": 7}' \
+    --user-params '{"cod_mg_l": 50000, "tss_mg_l": 35000, "tkn_mg_l": 2500}' \
     --tolerance 0.15
 ```
 
-### Step 4: Heuristic Sizing
-
+### Step 4: Size
 ```python
 mcp__anaerobic-design__heuristic_sizing_ad(
     use_current_basis=True,
@@ -174,103 +80,137 @@ mcp__anaerobic-design__heuristic_sizing_ad(
 )
 ```
 
-### Step 5: Run QSDsan Simulation ⚠️ REQUIRED
+### Step 5: Simulate (REQUIRED)
 
-**CRITICAL**: The simulation MUST be run as part of the complete workflow test. This validates that the Codex-generated ADM1 state works correctly with QSDsan's mADM1 process model.
+**IMPORTANT:**
+- Do NOT use a timeout parameter - simulations can take several minutes to reach steady state
+- Do NOT use backslash line breaks in the command - run as a single line or the command will fail
 
-#### Option A: Using MCP Tool (Returns CLI Command)
+```bash
+/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe utils/simulate_cli.py --basis simulation_basis.json --adm1-state adm1_state.json --heuristic-config simulation_heuristic_config.json --hrt-variation 0.2
+```
+
+**Optional Chemical Dosing Parameters:**
+
+Add chemical supplementation to the influent (specified as compound concentrations in mg/L):
+
+```bash
+# NaOH for alkalinity supplementation (mg/L as NaOH compound)
+--naoh-dose 2840
+
+# Na2CO3 for alkalinity supplementation (mg/L as Na2CO3 compound)
+--na2co3-dose 5000
+
+# FeCl3 for sulfide/phosphate removal (mg/L as FeCl3 compound)
+--fecl3-dose 100
+
+# Dynamic pH control (overrides fixed dosing)
+--pH-ctrl 7.0
+```
+
+**Notes:**
+- Dosages are specified as the **compound** (NaOH, Na2CO3, FeCl3), not as elements
+- The simulation converts to elemental species (S_Na, S_Fe) automatically
+- NaOH: 1 mg/L ≈ 0.025 meq/L alkalinity (MW = 40 g/mol)
+- Na2CO3: 1 mg/L ≈ 0.019 meq/L alkalinity (MW = 106 g/mol)
+
+Output Files:
+- `simulation_results.json` - Full detailed results (159 KB)
+- `simulation_performance.json` - Performance metrics (2 KB)
+- `simulation_inhibition.json` - Inhibition analysis (2 KB)
+- `simulation_precipitation.json` - Precipitation analysis (3 KB)
+
+### Step 6: Present Results to User (REQUIRED)
+
+After simulation completes, present results using the **token-efficient method**:
+
+**MOST EFFICIENT:** Read only the small summary JSON files (total ~7 KB) instead of the full results (159 KB):
 
 ```python
-mcp__anaerobic-design__simulate_ad_system_tool(
-    use_current_state=True,
-    validate_hrt=True
-)
+import json
+
+# Read compact summary files (saves 95% tokens)
+with open('simulation_performance.json') as f:
+    perf = json.load(f)
+with open('simulation_inhibition.json') as f:
+    inhib = json.load(f)
+with open('simulation_precipitation.json') as f:
+    precip = json.load(f)
 ```
 
-**Note**: This MCP tool returns a CLI command that must be executed manually due to long execution time (50-150 seconds) and STDIO timeout issues.
+**Present 3 tables to the user:**
 
-#### Option B: Direct CLI Execution (Recommended)
+1. **Performance Metrics Table:**
+   - Influent/effluent characteristics (pH, COD, VSS, VFA, alkalinity)
+   - Biogas production (total, CH₄, CO₂, H₂, H₂S)
+   - **Specific methane yield** (m³/kg COD removed, L/kg COD removed)
+   - **Net biomass yield** (kg VSS/kg COD removed, kg TSS/kg COD removed)
+   - COD removal efficiency
+   - Process stability (VFA/Alk ratios)
 
-Run the simulation directly via CLI:
+2. **Inhibition Metrics Table:**
+   - Overall methanogen health (%)
+   - Primary/secondary limiting factors
+   - pH inhibition (acetoclastic, hydrogenotrophic)
+   - Ammonia inhibition
+   - Hydrogen inhibition (propionate, LCFA)
+   - H₂S inhibition
+
+3. **Precipitation Metrics Table:**
+   - Total precipitation rate (kg/d)
+   - Phosphorus/sulfur precipitated
+   - Major minerals (struvite, K-struvite, HAP, calcite, FeS)
+   - Formation rates and concentrations
+
+4. **Overall Assessment:**
+   - Critical issues (pH < 6.0, VFA > 1000 mg/L, methanogen health < 50%)
+   - Warnings (low CH₄%, high H₂%)
+   - Success criteria
+
+**Token-Efficient Parsing Method:**
+
+Use the dedicated parser script to read only the 7 KB summary files (not the 159 KB full results):
 
 ```bash
-/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe utils/simulate_cli.py \
-    --basis simulation_basis.json \
-    --adm1-state adm1_state.json \
-    --heuristic-config simulation_heuristic_config.json \
-    --hrt-variation 0.2
+# Default usage (reads simulation_*.json from current directory)
+python3 utils/parse_simulation_results.py
+
+# Or specify custom files
+python3 utils/parse_simulation_results.py \
+    simulation_performance.json \
+    simulation_inhibition.json \
+    simulation_precipitation.json
 ```
 
-**What the simulation does**:
-1. Loads QSDsan components (~18 seconds)
-2. Creates mADM1 process model with production PCM solver
-3. Builds flowsheet (AnMBR with digester + MBR)
-4. Runs dynamic simulation (~50-150 seconds)
-5. Analyzes results (biogas production, effluent quality, sulfur balance)
-6. Saves results to `simulation_results.json`
+This displays three formatted tables:
+- **Table 1:** Performance metrics (influent/effluent, biogas, **specific methane yield**, **net biomass yield**)
+- **Table 2:** Inhibition metrics (methanogen health, pH/NH3/H2/H2S inhibition)
+- **Table 3:** Precipitation metrics (mineral formation rates and concentrations)
+- **Overall Assessment:** Critical issues, warnings, and key findings summary
 
-**Expected outputs**:
-- Methane production (m³/d, kg/d)
-- Biogas composition (CH₄, CO₂, H₂S percentages)
-- Effluent quality (COD, TSS, VSS, TKN, TP)
-- Sulfur mass balance (influent SO₄ → effluent H₂S)
-- Performance metrics (COD removal %, VSS destruction %)
-- HRT validation results (if `--hrt-variation` specified)
+**Token Savings:** Reads 7 KB instead of 159 KB = **95% reduction in tokens**
 
-**After simulation completes**:
+## Critical Units (mADM1 vs QSDsan)
 
-```bash
-# View results
-cat simulation_results.json | jq '.'
+**mADM1 State Variables (in JSON files)**:
+- All components in **kg/m³** (COD units)
+- Biomass (X_*): kg COD/m³ (NOT kg VSS/m³)
+- Convert to VSS: divide by 1.42
 
-# Or view specific metrics
-cat simulation_results.json | jq '.performance_metrics'
-cat simulation_results.json | jq '.biogas'
-cat simulation_results.json | jq '.sulfur_analysis'
-```
+**QSDsan Time Series (`stream.scope.record`)**:
+- All concentrations in **mg/L** (NOT kg/m³)
+- NO conversion needed for time series data
+- **DO NOT** multiply by 1000
 
-**Why this step is critical**:
-1. Validates that Codex-generated state is physically realistic
-2. Confirms mADM1 process model converges with the state
-3. Verifies biogas production matches theoretical yields
-4. Demonstrates complete end-to-end workflow
-5. Provides actual design outputs (not just heuristics)
+## Key Files
 
-**DO NOT skip this step** - the simulation is the ultimate validation that the entire workflow (parameters → Codex ADM1 generation → sizing → simulation) works correctly.
+- `utils/inoculum_generator.py`: Scales biomass + alkalinity for CSTR startup
+- `utils/qsdsan_madm1.py`: mADM1 process model (62 components, P/S/Fe extensions)
+- `utils/simulate_cli.py`: QSDsan simulation wrapper
+- `utils/validate_cli.py`: Bulk composite validation (COD, TSS, pH, ion balance)
 
-## Why Step 2 (Codex Generation) is Critical
+## Testing Notes
 
-1. **Core Innovation**: The Codex MCP server uses the complete mADM1 specification in `.codex/AGENTS.md` to intelligently generate all 62 state variables
-2. **Intelligent Estimation**: Goes beyond simple heuristics - uses feedstock characteristics to determine realistic distributions
-3. **Complete Component Set**: Generates P/S/Fe extension components that simple tools cannot estimate
-4. **Charge Balance**: Ensures ionic species are properly balanced
-5. **Production-Ready**: Uses the same process that will be used in production systems
-
-**DO NOT bypass this step by loading pre-existing JSON files** - that defeats the purpose of the workflow test.
-
-## Regression Testing - Important Note
-
-### test_regression_catastrophe.py Non-Determinism
-
-The regression test in `tests/test_regression_catastrophe.py` is **NOT deterministic** due to solver convergence issues with the catastrophic failure case. Different runs may produce varying magnitudes of failure:
-
-- **Observed TAN range**: 10,000 - 77,000 mg-N/L (both are severe failures, normal is ~40 mg-N/L)
-- **pH range**: 4.0 - 7.0 (depending on convergence path)
-- **VFA accumulation**: 6 - 47 kg/m³ (both indicate process failure)
-
-#### What the test DOES reliably show:
-1. **TAN accumulation bug** - Always shows ammonia accumulation (>10,000 mg-N/L vs normal 40 mg-N/L)
-2. **Biomass washout bug** - Consistently shows TSS < 10 mg/L (complete biomass loss)
-3. **Severe methanogenic inhibition** - I_nh3 < 0.1 (>90% inhibition)
-
-#### How to use this test:
-- Use it to ensure **directional improvement** - fixes should reduce TAN and increase biomass
-- Do NOT expect exact reproducibility of specific values
-- The xfail assertions are set conservatively (TAN > 50,000) but may need adjustment
-- Focus on order-of-magnitude improvements rather than precise values
-
-#### Why non-determinism occurs:
-- Solver finds different local minima when the model is infeasible
-- Sequential decomposition initialization varies
-- MLSS constraints and other fixes alter the failure mode
-- Numerical precision differences across environments
+- `test_regression_catastrophe.py`: Non-deterministic (solver convergence varies)
+- Focus on directional improvements, not exact values
+- TAN accumulation, biomass washout indicate failure

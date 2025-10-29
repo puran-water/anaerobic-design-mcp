@@ -123,7 +123,15 @@ def main():
     try:
         # Load ADM1 state from file
         with open(args.adm1_state, 'r') as f:
-            adm1_state = json.load(f)
+            adm1_state_raw = json.load(f)
+
+        # Extract numeric values from annotated format [value, unit, explanation]
+        adm1_state = {}
+        for k, v in adm1_state_raw.items():
+            if isinstance(v, (list, tuple)) and len(v) > 0:
+                adm1_state[k] = float(v[0])
+            else:
+                adm1_state[k] = float(v)
 
         temperature_k = 273.15 + args.temperature_c
 
