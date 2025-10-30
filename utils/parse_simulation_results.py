@@ -16,6 +16,11 @@ Usage:
 
 import json
 import sys
+import io
+
+# Force UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 def parse_and_display_results(perf_file='simulation_performance.json',
                               inhib_file='simulation_inhibition.json',

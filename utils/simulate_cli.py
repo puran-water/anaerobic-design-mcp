@@ -215,7 +215,7 @@ def run_simulation(
         if validate_hrt:
             effluent_check = analyze_liquid_stream(eff_c)
             biogas_check = analyze_gas_stream(gas_c, inf_c, eff_c)
-            yields_check = analyze_biomass_yields(inf_c, eff_c)
+            yields_check = analyze_biomass_yields(inf_c, eff_c, system=sys_c)
 
             validation_results = {
                 "hrt_design": heuristic_config['digester']['HRT_days'],
