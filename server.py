@@ -28,13 +28,63 @@ if 'LOCALAPPDATA' not in os.environ:
 if 'JUPYTER_PLATFORM_DIRS' not in os.environ:
     os.environ['JUPYTER_PLATFORM_DIRS'] = '1'
 
-from fastmcp import FastMCP
-from utils.qsdsan_loader import get_qsdsan_components
-from contextlib import asynccontextmanager
-
-# Configure logging
+# Configure logging BEFORE any code that uses logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# CRITICAL FIX: Patch MCP STDIO buffer size to prevent WSL2 blocking issue
+# Issue: modelcontextprotocol/python-sdk#262, #1333, #1141
+# Root cause: max_buffer_size=0 causes synchronous blocking on WSL2/Linux
+# Fix: Increase buffer size to 16 to allow async message handling
+from contextlib import asynccontextmanager
+import anyio
+
+try:
+    from mcp.server import stdio as mcp_stdio
+    import fastmcp.server.server as fastmcp_server
+
+    # Store original stdio_server
+    _original_stdio_server = mcp_stdio.stdio_server
+
+    @asynccontextmanager
+    async def buffered_stdio_server(*args, **kwargs):
+        """Patched stdio_server with buffered memory streams."""
+        # Get the read/write streams from original implementation
+        async with _original_stdio_server(*args, **kwargs) as (read_stream, write_stream):
+            # Wrap in buffered streams (buffer size 16 instead of 0)
+            buffered_read_send, buffered_read_receive = anyio.create_memory_object_stream(16)
+            buffered_write_send, buffered_write_receive = anyio.create_memory_object_stream(16)
+
+            # Proxy messages through buffered streams
+            async def proxy_reader():
+                async with read_stream:
+                    async for message in read_stream:
+                        await buffered_read_send.send(message)
+                await buffered_read_send.aclose()
+
+            async def proxy_writer():
+                async with write_stream:
+                    async for message in buffered_write_receive:
+                        await write_stream.send(message)
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(proxy_reader)
+                tg.start_soon(proxy_writer)
+                try:
+                    yield buffered_read_receive, buffered_write_send
+                finally:
+                    await buffered_write_send.aclose()
+                    tg.cancel_scope.cancel()
+
+    # Apply monkey-patch
+    fastmcp_server.stdio_server = buffered_stdio_server
+    logger.info("Applied STDIO buffer patch (max_buffer_size=16) to fix WSL2 blocking issue")
+
+except ImportError as e:
+    logger.warning(f"Could not apply STDIO buffer patch: {e}")
+
+from fastmcp import FastMCP
+from utils.qsdsan_loader import get_qsdsan_components
 
 # FastMCP lifespan: DISABLED - Background loading causes file I/O contention
 # The asyncio.create_task() for QSDsan loading interferes with file operations
@@ -188,15 +238,40 @@ async def heuristic_sizing_ad(
     biomass_yield: float = None,
     target_srt_days: float = None,
     use_current_basis: bool = True,
-    custom_basis: dict = None
+    custom_basis: dict = None,
+    # Tank material and geometry
+    tank_material: str = "concrete",
+    height_to_diameter_ratio: float = 1.2,
+    # Mixing configuration
+    mixing_type: str = "mechanical",
+    mixing_power_target_w_m3: float = None,
+    impeller_type: str = "pitched_blade_turbine",
+    pumped_recirculation_turnovers_per_hour: float = 3.0,
+    # Biogas handling
+    biogas_application: str = "storage",
+    biogas_discharge_pressure_kpa: float = None,
+    # Thermal analysis
+    calculate_thermal_load: bool = True,
+    feedstock_inlet_temp_c: float = 10.0,
+    insulation_R_value_si: float = 1.76
 ):
     """
-    Perform heuristic sizing for anaerobic digester and auxiliary equipment.
+    Perform heuristic sizing for anaerobic digester with integrated mixing, biogas, and thermal analysis.
 
-    Sizes digester, MBR (if required), and estimates biogas production.
+    Sizes digester, calculates tank dimensions, mixing power, biogas blower sizing, and thermal loads.
+    Determines flowsheet configuration (high TSS with dewatering vs. low TSS with MBR).
+
+    Returns tank dimensions, mixing details, biogas blower specs, and thermal analysis request.
     """
     from tools.sizing import heuristic_sizing_ad as _impl
-    return await _impl(biomass_yield, target_srt_days, use_current_basis, custom_basis)
+    return await _impl(
+        biomass_yield, target_srt_days, use_current_basis, custom_basis,
+        tank_material, height_to_diameter_ratio,
+        mixing_type, mixing_power_target_w_m3, impeller_type,
+        pumped_recirculation_turnovers_per_hour,
+        biogas_application, biogas_discharge_pressure_kpa,
+        calculate_thermal_load, feedstock_inlet_temp_c, insulation_R_value_si
+    )
 
 @mcp.tool()
 async def simulate_ad_system_tool(

@@ -20,6 +20,32 @@
       "env": {
         "CODEX_HOME": "/mnt/c/Users/hvksh/mcp-servers/anaerobic-design-mcp/.codex"
       }
+    },
+    "aerobic-treatment-kb": {
+      "command": "/home/hvksh/knowledgebase/.venv/bin/python",
+      "args": ["/home/hvksh/knowledgebase/server.py", "stdio"],
+      "env": {
+        "OLLAMA_URL": "http://localhost:11434",
+        "OLLAMA_MODEL": "snowflake-arctic-embed:xs",
+        "TEI_RERANK_URL": "http://localhost:8087",
+        "QDRANT_URL": "http://localhost:6333",
+        "FTS_DB_PATH": "/home/hvksh/knowledgebase/data/aerobic_treatment_kb_fts.db",
+        "NOMIC_KB_SCOPES": "{\"aerobic_treatment_kb\":{\"collection\":\"aerobic_treatment_kb\",\"title\":\"Aerobic Treatment KB\"}}"
+      },
+      "autoApprove": ["search_aerobic_treatment_kb"]
+    },
+    "heat-transfer-mcp": {
+      "type": "stdio",
+      "command": "/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe",
+      "args": [
+        "C:\\Users\\hvksh\\mcp-servers\\heat-transfer-mcp\\server.py"
+      ],
+      "env": {
+        "MCP_TIMEOUT": "600000",
+        "HEAT_TRANSFER_MCP_ROOT": "C:\\Users\\hvksh\\mcp-servers\\heat-transfer-mcp",
+        "MCP_SIMULATION_TIMEOUT_S": "280"
+      },
+      "autoApprove": ["tank_heat_loss", "heat_exchanger_design", "calculate_heat_duty"]
     }
   }
 }

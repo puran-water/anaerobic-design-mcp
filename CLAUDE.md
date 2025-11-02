@@ -4,6 +4,8 @@
 
 - **anaerobic-design MCP**: Main server (basis of design, sizing, simulation)
 - **ADM1-State-Variable-Estimator MCP**: Codex server for mADM1 state generation (GPT-5)
+- **heat-transfer-mcp**: Thermal analysis server (heat duty, tank heat loss, heat exchanger design)
+- **aerobic-treatment-kb**: Semantic search through Metcalf & Eddy knowledge base
 
 ## Complete Workflow (DO NOT SKIP STEPS)
 
@@ -76,9 +78,124 @@ python utils/validate_cli.py validate \
 ```python
 mcp__anaerobic-design__heuristic_sizing_ad(
     use_current_basis=True,
-    target_srt_days=20
+    target_srt_days=20,
+    # Tank configuration
+    tank_material="concrete",  # or "steel_bolted"
+    height_to_diameter_ratio=1.2,
+    # Mixing configuration
+    mixing_type="mechanical",  # "pumped", "mechanical", or "hybrid"
+    mixing_power_target_w_m3=7.0,  # W/m³ (default for mesophilic)
+    impeller_type="pitched_blade_turbine",  # "rushton_turbine", "marine_propeller"
+    pumped_recirculation_turnovers_per_hour=3.0,
+    # Eductor/jet mixer configuration (for pumped mixing only)
+    mixing_mode="simple",  # "simple" or "eductor" (default: "simple")
+    entrainment_ratio=5.0,  # Total flow : motive flow ratio (for eductor mode)
+    use_eductor_physics=True,  # Use fluids.jet_pump model (default: True)
+    # Biogas handling
+    biogas_application="storage",  # "direct_utilization", "upgrading"
+    biogas_discharge_pressure_kpa=25.0,
+    # Thermal analysis
+    calculate_thermal_load=True,
+    feedstock_inlet_temp_c=10.0,
+    insulation_R_value_si=1.76  # m²K/W (SI units)
 )
 ```
+
+**Eductor vs. Simple Pumped Mixing:**
+- **Simple pumped**: Pump flow = recirculation flow (e.g., 3000 m³/h for 3 turnovers/h on 1000 m³ tank)
+- **Eductor mode**: Pump flow = recirculation flow / entrainment_ratio (e.g., 600 m³/h motive flow creates 3000 m³/h total educted flow)
+  - Uses high-velocity nozzle (15-30 m/s) to entrain additional liquid
+  - Higher pump TDH (includes velocity head: v²/2g)
+  - CRITICAL: Prevents 5× pump oversizing error (pump sized for motive flow, NOT total flow)
+  - Physics-based modeling via `fluids.jet_pump.liquid_jet_pump()`
+
+**Sizing Output includes:**
+- Tank dimensions (diameter, height, volume)
+- Mixing system details (power, impeller speed, Reynolds number)
+- Biogas blower preliminary sizing
+- **Thermal analysis request structure** (for use with heat-transfer-mcp)
+
+### Step 4a: Thermal Analysis (OPTIONAL)
+
+Use heat-transfer-mcp tools to perform detailed thermal calculations based on the heuristic sizing output.
+
+**Calculate Feedstock Heating Load:**
+```python
+mcp__heat-transfer-mcp__calculate_heat_duty(
+    calculation_method="sensible_heat",
+    fluid_name="water",  # or appropriate feedstock fluid
+    flow_rate=11.57,  # kg/s (from Q_m3d / 86400 * density)
+    inlet_temp=283.15,  # K (10°C)
+    outlet_temp=308.15,  # K (35°C)
+    fluid_pressure=101325.0  # Pa
+)
+```
+
+**Calculate Tank Heat Loss:**
+```python
+mcp__heat-transfer-mcp__tank_heat_loss(
+    geometry="vertical_cylinder_tank",
+    dimensions={"diameter": 23.13, "height": 27.76},  # m (from sizing)
+    contents_temperature=308.15,  # K (35°C)
+    fluid_name_internal="water",
+    fluid_name_external="air",
+    # Headspace modeling (for digesters with biogas space)
+    headspace_height_m=2.0,  # m (gas space above liquid)
+    headspace_fluid="biogas",
+    # Insulation specification
+    insulation_R_value_si=1.76,  # m²K/W (from sizing)
+    assumed_insulation_k_w_mk=0.035,  # W/m·K (typical foam insulation)
+    # Ambient conditions (direct specification)
+    ambient_air_temperature=263.15,  # K (-10°C design condition)
+    wind_speed=5.0,  # m/s
+    # OR use weather data (percentile-based design)
+    # latitude=40.7128, longitude=-74.0060,  # NYC
+    # start_date="2020-01-01", end_date="2024-12-31",
+    # design_percentile=0.99,  # 99th percentile cold (1% exceedance)
+    # time_resolution="daily",
+    # Surface properties
+    surface_emissivity=0.85,
+    # Ground contact (auto-enabled for vertical tanks)
+    include_ground_contact=True,
+    average_external_air_temperature=283.15  # K (10°C annual average)
+)
+```
+
+**Size Heat Exchanger (for feedstock pre-heating):**
+```python
+mcp__heat-transfer-mcp__heat_exchanger_design(
+    # Process heating
+    process_fluid="water",
+    process_mass_flow_kg_s=11.57,  # kg/s
+    process_inlet_temp_K=283.15,  # K (10°C)
+    process_target_temp_K=308.15,  # K (35°C)
+    # Heating medium (hot water from biogas CHP)
+    heating_fluid="hot_water",
+    heating_inlet_temp_K=363.15,  # K (90°C)
+    heating_outlet_temp_K=333.15,  # K (60°C)
+    # Heat exchanger configuration
+    overall_U_W_m2K=1000.0,  # W/m²K (typical for plate HX)
+    hx_type="shell_tube",  # "plate", "coil", "double_pipe"
+    flow_arrangement="counterflow",
+    # Optional: include tank heat loss in total duty
+    include_tank_loss=True,
+    tank_params={
+        "geometry": "vertical_cylinder_tank",
+        "dimensions": {"diameter": 23.13, "height": 27.76},
+        "contents_temperature": 308.15,
+        "insulation_R_value_si": 1.76,
+        "ambient_air_temperature": 263.15,
+        "wind_speed": 5.0
+    },
+    estimate_physical=True  # Get shell/tube dimensions
+)
+```
+
+**Key Thermal Outputs:**
+- Feedstock heating: Q [kW], required heat input to raise inlet to digester temp
+- Tank heat loss: Q [kW], continuous heat loss through walls/roof/floor
+- Heat exchanger: Area [m²], shell/tube dimensions, LMTD [K]
+- **Total heat load**: Feedstock + Tank loss [kW]
 
 ### Step 4b: Prepare Simulation Files (REQUIRED)
 ```python
@@ -223,6 +340,6 @@ This displays three formatted tables:
 
 ## Testing Notes
 
-- `test_regression_catastrophe.py`: Non-deterministic (solver convergence varies)
-- Focus on directional improvements, not exact values
+- Focus on directional improvements in simulation outputs, not exact values
 - TAN accumulation, biomass washout indicate failure
+- Simulation convergence may vary depending on initial conditions

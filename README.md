@@ -6,10 +6,11 @@ Production-ready MCP (Model Context Protocol) server for anaerobic digester desi
 
 This server provides an end-to-end workflow for designing anaerobic digesters treating high-strength wastewater, from feedstock characterization through dynamic simulation. It leverages QSDsan's production-grade mADM1 model with phosphorus/sulfur/iron extensions for comprehensive nutrient recovery and biogas production modeling.
 
-**Status**: Production-Ready (2025-10-26)
+**Status**: Production-Ready + Enhanced Design Tools (2025-10-30)
 
 ## Key Features
 
+### Core Process Model
 - **Complete mADM1 Model (62 Components)**: Full Modified ADM1 with P/S/Fe extensions
   - 27 core ADM1 components (sugars, amino acids, VFAs, biomass)
   - 3 EBPR components (X_PHA, X_PP, X_PAO)
@@ -24,7 +25,23 @@ This server provides an end-to-end workflow for designing anaerobic digesters tr
 
 - **Dynamic Simulation**: QSDsan's AnaerobicCSTR reactor with 4-component biogas tracking (H2, CH4, CO2, H2S)
 
-- **Complete Workflow**: Parameters → ADM1 generation → Validation → Sizing → Simulation
+### Enhanced Design Tools (Week 1-2 Implementation)
+- **Mixing Module** (`utils/mixing_calculations.py`): Physics-based power calculations for mechanical and pumped mixing
+  - Eductor/jet pump support with `fluids.jet_pump` integration (prevents 5× pump oversizing)
+  - Non-Newtonian rheology corrections (Metzner-Otto method)
+  - Multiple impeller types (pitched blade, Rushton, marine propeller)
+
+- **Rheology Module** (`utils/rheology.py`): TSS-dependent viscosity for accurate mixing power
+  - WEF MOP-8 validated correlations
+  - Power-law parameters (Baudez et al. 2011)
+  - Temperature corrections
+
+- **Thermal Integration**: Direct MCP access to heat-transfer-mcp server
+  - Feedstock heating load calculations
+  - Tank heat loss (insulated vessels, weather data integration)
+  - Heat exchanger sizing (plate, shell-tube, coil)
+
+- **Complete Workflow**: Parameters → ADM1 generation → Validation → **Sizing + Mixing + Thermal** → Simulation
 
 ## Quick Start
 
