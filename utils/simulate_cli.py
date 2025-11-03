@@ -38,6 +38,7 @@ def run_simulation(
     check_interval: float = 2,
     tolerance: float = 1e-3,
     output_file: str = 'simulation_results.json',
+    output_dir: str = '.',
     fecl3_dose_mg_L: float = 0,
     naoh_dose_mg_L: float = 0,
     na2co3_dose_mg_L: float = 0,
@@ -56,13 +57,18 @@ def run_simulation(
         hrt_variation: HRT variation for validation (default 0.2)
         check_interval: Days between convergence checks (default 2)
         tolerance: Convergence tolerance in kg/m3/d (default 1e-3)
-        output_file: Path to save results JSON
+        output_file: Path to save results JSON (relative to output_dir)
+        output_dir: Directory for all output files (default: current directory)
         fecl3_dose_mg_L: FeCl3 dose in mg/L (default 0 = no dosing)
         naoh_dose_mg_L: NaOH dose in mg/L (default 0 = no dosing)
         na2co3_dose_mg_L: Na2CO3 dose in mg/L (default 0 = no dosing)
     """
     try:
         start_time = datetime.now()
+
+        # Create output directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
 
         # Load input files
         logger.info("Loading input files...")
@@ -271,9 +277,10 @@ def run_simulation(
         }
 
         # Save legacy results file (for backward compatibility)
-        with open(output_file, 'w') as f:
+        full_results_path = output_path / output_file
+        with open(full_results_path, 'w') as f:
             json.dump(result, f, indent=2)
-        logger.info(f"Legacy results saved to {output_file} (deprecated)")
+        logger.info(f"Legacy results saved to {full_results_path} (deprecated)")
 
         # Generate formatted output files
         logger.info("Generating formatted output files...")
@@ -291,27 +298,31 @@ def run_simulation(
 
         # Format and save performance output
         performance_output = format_performance_output(result, inf_vfa_alk, eff_vfa_alk)
-        with open('simulation_performance.json', 'w') as f:
+        perf_path = output_path / 'simulation_performance.json'
+        with open(perf_path, 'w') as f:
             json.dump(performance_output, f, indent=2)
-        logger.info("  ✓ simulation_performance.json")
+        logger.info(f"  ✓ {perf_path}")
 
         # Format and save inhibition output
         inhibition_output = format_inhibition_output(diagnostics)
-        with open('simulation_inhibition.json', 'w') as f:
+        inhib_path = output_path / 'simulation_inhibition.json'
+        with open(inhib_path, 'w') as f:
             json.dump(inhibition_output, f, indent=2)
-        logger.info("  ✓ simulation_inhibition.json")
+        logger.info(f"  ✓ {inhib_path}")
 
         # Format and save precipitation output
         precipitation_output = format_precipitation_output(diagnostics, effluent)
-        with open('simulation_precipitation.json', 'w') as f:
+        precip_path = output_path / 'simulation_precipitation.json'
+        with open(precip_path, 'w') as f:
             json.dump(precipitation_output, f, indent=2)
-        logger.info("  ✓ simulation_precipitation.json")
+        logger.info(f"  ✓ {precip_path}")
 
         # Format and save timeseries output
         timeseries_output = format_timeseries_output(result)
-        with open('simulation_timeseries.json', 'w') as f:
+        timeseries_path = output_path / 'simulation_timeseries.json'
+        with open(timeseries_path, 'w') as f:
             json.dump(timeseries_output, f, indent=2)
-        logger.info("  ✓ simulation_timeseries.json")
+        logger.info(f"  ✓ {timeseries_path}")
 
         logger.info("=== Simulation Complete ===")
 
@@ -406,6 +417,11 @@ def main():
         default='simulation_results.json',
         help='Path to save results JSON (default: simulation_results.json)'
     )
+    parser.add_argument(
+        '--output-dir',
+        default='.',
+        help='Directory for all output files (default: current directory)'
+    )
 
     args = parser.parse_args()
 
@@ -418,6 +434,7 @@ def main():
         check_interval=args.check_interval,
         tolerance=args.tolerance,
         output_file=args.output,
+        output_dir=args.output_dir,
         fecl3_dose_mg_L=args.fecl3_dose,
         naoh_dose_mg_L=args.naoh_dose,
         na2co3_dose_mg_L=args.na2co3_dose,

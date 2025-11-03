@@ -34,51 +34,124 @@ logger = logging.getLogger(__name__)
 
 # CRITICAL FIX: Patch MCP STDIO buffer size to prevent WSL2 blocking issue
 # Issue: modelcontextprotocol/python-sdk#262, #1333, #1141
-# Root cause: max_buffer_size=0 causes synchronous blocking on WSL2/Linux
-# Fix: Increase buffer size to 16 to allow async message handling
+# Root cause: max_buffer_size=0 in mcp.server.stdio causes synchronous blocking on WSL2/Linux
+# Fix: Replace stdio_server entirely with buffered version (max_buffer_size=256)
+#
+# ANALYSIS (from Codex 2025-11-02):
+# Previous patch only buffered between FastMCP and SDK, but the real bottleneck is INSIDE
+# the SDK's stdio transport where anyio.create_memory_object_stream(0) creates synchronous,
+# zero-capacity streams. This deeper patch replaces the SDK's stdio_server function itself.
 from contextlib import asynccontextmanager
+import sys
+from io import TextIOWrapper
 import anyio
+import anyio.lowlevel
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 try:
-    from mcp.server import stdio as mcp_stdio
+    import mcp.types as types
+    from mcp.shared.message import SessionMessage
+    import mcp.server.stdio as mcp_stdio
     import fastmcp.server.server as fastmcp_server
 
-    # Store original stdio_server
-    _original_stdio_server = mcp_stdio.stdio_server
-
     @asynccontextmanager
-    async def buffered_stdio_server(*args, **kwargs):
-        """Patched stdio_server with buffered memory streams."""
-        # Get the read/write streams from original implementation
-        async with _original_stdio_server(*args, **kwargs) as (read_stream, write_stream):
-            # Wrap in buffered streams (buffer size 16 instead of 0)
-            buffered_read_send, buffered_read_receive = anyio.create_memory_object_stream(16)
-            buffered_write_send, buffered_write_receive = anyio.create_memory_object_stream(16)
+    async def buffered_stdio_server(
+        stdin: anyio.AsyncFile[str] | None = None,
+        stdout: anyio.AsyncFile[str] | None = None,
+        max_buffer_size: int = 256  # CRITICAL: Use 256 instead of 0
+    ):
+        """
+        PATCHED stdio_server with buffered memory streams.
 
-            # Proxy messages through buffered streams
-            async def proxy_reader():
-                async with read_stream:
-                    async for message in read_stream:
-                        await buffered_read_send.send(message)
-                await buffered_read_send.aclose()
+        This is a complete replacement of mcp.server.stdio.stdio_server that uses
+        max_buffer_size=256 instead of 0 to prevent synchronous blocking on WSL2/Linux.
 
-            async def proxy_writer():
-                async with write_stream:
-                    async for message in buffered_write_receive:
-                        await write_stream.send(message)
+        Based on mcp.server.stdio.stdio_server from modelcontextprotocol/python-sdk
+        with ONLY the buffer size changed from 0 to 256 on lines 57-58.
+        """
+        # Purposely not using context managers for these, as we don't want to close
+        # standard process handles. Encoding of stdin/stdout as text streams on
+        # python is platform-dependent (Windows is particularly problematic), so we
+        # re-wrap the underlying binary stream to ensure UTF-8.
+        if not stdin:
+            stdin = anyio.wrap_file(TextIOWrapper(sys.stdin.buffer, encoding="utf-8"))
+        if not stdout:
+            stdout = anyio.wrap_file(TextIOWrapper(sys.stdout.buffer, encoding="utf-8"))
 
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(proxy_reader)
-                tg.start_soon(proxy_writer)
-                try:
-                    yield buffered_read_receive, buffered_write_send
-                finally:
-                    await buffered_write_send.aclose()
-                    tg.cancel_scope.cancel()
+        read_stream: MemoryObjectReceiveStream[SessionMessage | Exception]
+        read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception]
 
-    # Apply monkey-patch
+        write_stream: MemoryObjectSendStream[SessionMessage]
+        write_stream_reader: MemoryObjectReceiveStream[SessionMessage]
+
+        # CRITICAL FIX: Change from max_buffer_size=0 to max_buffer_size=256
+        read_stream_writer, read_stream = anyio.create_memory_object_stream(max_buffer_size)
+        write_stream, write_stream_reader = anyio.create_memory_object_stream(max_buffer_size)
+
+        async def stdin_reader():
+            try:
+                async with read_stream_writer:
+                    async for line in stdin:
+                        try:
+                            message = types.JSONRPCMessage.model_validate_json(line)
+                        except Exception as exc:
+                            await read_stream_writer.send(exc)
+                            continue
+
+                        session_message = SessionMessage(message)
+                        await read_stream_writer.send(session_message)
+            except anyio.ClosedResourceError:
+                await anyio.lowlevel.checkpoint()
+
+        async def stdout_writer():
+            try:
+                async with write_stream_reader:
+                    async for session_message in write_stream_reader:
+                        json = session_message.message.model_dump_json(by_alias=True, exclude_none=True)
+                        await stdout.write(json + "\n")
+                        await stdout.flush()
+            except anyio.ClosedResourceError:
+                await anyio.lowlevel.checkpoint()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(stdin_reader)
+            tg.start_soon(stdout_writer)
+            yield read_stream, write_stream
+
+    # Apply deep monkey-patch: Replace SDK's stdio_server entirely
+    mcp_stdio.stdio_server = buffered_stdio_server
     fastmcp_server.stdio_server = buffered_stdio_server
-    logger.info("Applied STDIO buffer patch (max_buffer_size=16) to fix WSL2 blocking issue")
+
+    # SECOND BLOCKING POINT: Patch ServerSession to use buffered incoming message stream
+    # Root cause (from Codex 2025-11-02): ServerSession.__init__ creates zero-capacity queue
+    # at mcp/server/session.py:96-98 which causes backpressure even with buffered stdio
+    from mcp.server.session import ServerSession
+    import mcp.types as mcp_types
+
+    _original_server_session_init = ServerSession.__init__
+
+    def buffered_server_session_init(self, read_stream, write_stream, init_options=None, stateless=False):
+        """Patched ServerSession.__init__ with buffered incoming message stream."""
+        # Call original __init__ but it will create zero-capacity stream
+        _original_server_session_init(self, read_stream, write_stream, init_options, stateless)
+
+        # CRITICAL FIX: Replace the zero-capacity stream with buffered version
+        # Close the zero-capacity stream created by original __init__
+        import anyio
+
+        # Recreate with buffer size 256
+        self._incoming_message_stream_writer, self._incoming_message_stream_reader = (
+            anyio.create_memory_object_stream(256)
+        )
+
+        # Re-register the close callback (original __init__ already registered it)
+        # Note: exit_stack already has the callback, so we don't duplicate it
+
+    ServerSession.__init__ = buffered_server_session_init
+
+    logger.info("Applied DEEP STDIO buffer patch (max_buffer_size=256) to fix WSL2 blocking issue")
+    logger.info("Patched: mcp.server.stdio.stdio_server (stdio transport layer)")
+    logger.info("Patched: mcp.server.session.ServerSession (incoming message queue)")
 
 except ImportError as e:
     logger.warning(f"Could not apply STDIO buffer patch: {e}")
@@ -172,9 +245,15 @@ async def validate_adm1_state(user_parameters: dict, tolerance: float = 0.10, us
         user_parameters: Target values (cod_mg_l, tss_mg_l, vss_mg_l, tkn_mg_l, tp_mg_l, ph)
         tolerance: Relative tolerance for validation (default 0.10 = 10%)
         use_current_adm1: Use ADM1 state from design_state (default True)
+
+    Returns job_id immediately. Use get_job_status() to check progress and get_job_results() to retrieve results.
+
+    IMPORTANT: This tool now runs in background. Do NOT wait for results - use get_job_status(job_id) instead.
     """
-    from tools.validation import validate_adm1_state as _impl
+    from utils.job_manager import JobManager
     from core.state import design_state
+    import sys
+    import json
 
     if use_current_adm1:
         adm1_state = design_state.adm1_state
@@ -183,7 +262,31 @@ async def validate_adm1_state(user_parameters: dict, tolerance: float = 0.10, us
     else:
         return {"status": "error", "message": "Must set use_current_adm1=True or provide adm1_state directly"}
 
-    return await _impl(adm1_state, user_parameters, tolerance)
+    # Build command for validate_cli.py
+    cmd = [
+        sys.executable,
+        "utils/validate_cli.py",
+        "--output-dir", "jobs/{job_id}",  # Must come before subcommand
+        "validate",
+        "--adm1-state", "adm1_state.json",
+        "--user-params", json.dumps(user_parameters),
+        "--tolerance", str(tolerance),
+    ]
+
+    # Execute in background
+    manager = JobManager()
+    job = await manager.execute(cmd=cmd, cwd=".")
+
+    return {
+        "job_id": job["id"],
+        "status": job["status"],
+        "message": "Validation job started. Use get_job_status() to monitor progress.",
+        "command": " ".join(cmd[:3]) + " ...",
+        "next_steps": [
+            f"Check status: get_job_status('{job['id']}')",
+            f"Get results: get_job_results('{job['id']}')"
+        ]
+    }
 
 @mcp.tool()
 async def compute_bulk_composites(temperature_c: float = 35.0, use_current_adm1: bool = True):
@@ -196,9 +299,14 @@ async def compute_bulk_composites(temperature_c: float = 35.0, use_current_adm1:
     Args:
         temperature_c: Temperature in Celsius (default 35°C)
         use_current_adm1: Use ADM1 state from design_state (default True)
+
+    Returns job_id immediately. Use get_job_status() to check progress and get_job_results() to retrieve results.
+
+    IMPORTANT: This tool now runs in background. Do NOT wait for results - use get_job_status(job_id) instead.
     """
-    from tools.validation import compute_bulk_composites as _impl
+    from utils.job_manager import JobManager
     from core.state import design_state
+    import sys
 
     if use_current_adm1:
         adm1_state = design_state.adm1_state
@@ -207,7 +315,30 @@ async def compute_bulk_composites(temperature_c: float = 35.0, use_current_adm1:
     else:
         return {"status": "error", "message": "Must set use_current_adm1=True"}
 
-    return await _impl(adm1_state, temperature_c)
+    # Build command for validate_cli.py composites subcommand
+    cmd = [
+        sys.executable,
+        "utils/validate_cli.py",
+        "--output-dir", "jobs/{job_id}",  # Must come before subcommand
+        "composites",
+        "--adm1-state", "adm1_state.json",
+        "--temperature-c", str(temperature_c),
+    ]
+
+    # Execute in background
+    manager = JobManager()
+    job = await manager.execute(cmd=cmd, cwd=".")
+
+    return {
+        "job_id": job["id"],
+        "status": job["status"],
+        "message": "Bulk composites calculation job started. Use get_job_status() to monitor progress.",
+        "command": " ".join(cmd[:3]) + " ...",
+        "next_steps": [
+            f"Check status: get_job_status('{job['id']}')",
+            f"Get results: get_job_results('{job['id']}')"
+        ]
+    }
 
 @mcp.tool()
 async def check_strong_ion_balance(ph: float = 7.0, max_imbalance_percent: float = 5.0, use_current_adm1: bool = True):
@@ -261,17 +392,56 @@ async def heuristic_sizing_ad(
     Sizes digester, calculates tank dimensions, mixing power, biogas blower sizing, and thermal loads.
     Determines flowsheet configuration (high TSS with dewatering vs. low TSS with MBR).
 
-    Returns tank dimensions, mixing details, biogas blower specs, and thermal analysis request.
+    Returns job_id immediately. Use get_job_status() to check progress and get_job_results() to retrieve results.
+
+    IMPORTANT: This tool now runs in background. Do NOT wait for results - use get_job_status(job_id) instead.
     """
-    from tools.sizing import heuristic_sizing_ad as _impl
-    return await _impl(
-        biomass_yield, target_srt_days, use_current_basis, custom_basis,
-        tank_material, height_to_diameter_ratio,
-        mixing_type, mixing_power_target_w_m3, impeller_type,
-        pumped_recirculation_turnovers_per_hour,
-        biogas_application, biogas_discharge_pressure_kpa,
-        calculate_thermal_load, feedstock_inlet_temp_c, insulation_R_value_si
-    )
+    from utils.job_manager import JobManager
+    import sys
+
+    # Build command for CLI wrapper
+    cmd = [
+        sys.executable,  # Use same Python interpreter as server
+        "utils/heuristic_sizing_cli.py",
+        "--output-dir", "jobs/{job_id}",  # {job_id} will be replaced by JobManager
+    ]
+
+    # Add optional parameters
+    if target_srt_days is not None:
+        cmd.extend(["--target-srt", str(target_srt_days)])
+    if mixing_type:
+        cmd.extend(["--mixing-type", mixing_type])
+    if biogas_application:
+        cmd.extend(["--biogas-application", biogas_application])
+    if height_to_diameter_ratio is not None:
+        cmd.extend(["--height-to-diameter-ratio", str(height_to_diameter_ratio)])
+    if tank_material:
+        cmd.extend(["--tank-material", tank_material])
+    if mixing_power_target_w_m3 is not None:
+        cmd.extend(["--mixing-power-target", str(mixing_power_target_w_m3)])
+    if impeller_type:
+        cmd.extend(["--impeller-type", impeller_type])
+    if feedstock_inlet_temp_c is not None:
+        cmd.extend(["--feedstock-inlet-temp", str(feedstock_inlet_temp_c)])
+    if insulation_R_value_si is not None:
+        cmd.extend(["--insulation-r-value", str(insulation_R_value_si)])
+    if biogas_discharge_pressure_kpa is not None:
+        cmd.extend(["--biogas-discharge-pressure", str(biogas_discharge_pressure_kpa)])
+
+    # Execute in background
+    manager = JobManager()
+    job = await manager.execute(cmd=cmd, cwd=".")
+
+    return {
+        "job_id": job["id"],
+        "status": job["status"],
+        "message": "Heuristic sizing job started. Use get_job_status() to monitor progress.",
+        "command": " ".join(cmd[:3]) + " ...",
+        "next_steps": [
+            f"Check status: get_job_status('{job['id']}')",
+            f"Get results: get_job_results('{job['id']}')"
+        ]
+    }
 
 @mcp.tool()
 async def simulate_ad_system_tool(
@@ -293,10 +463,51 @@ async def simulate_ad_system_tool(
     - Sulfur analysis (mass balance, speciation, H2S in biogas)
     - HRT validation (if validate_hrt=True)
     - Optional chemical dosing (FeCl3, NaOH, Na2CO3)
+
+    Returns job_id immediately. Use get_job_status() to check progress and get_job_results() to retrieve results.
+
+    IMPORTANT: This tool now runs in background. Do NOT wait for results - use get_job_status(job_id) instead.
     """
-    from tools.simulation import simulate_ad_system_tool as _impl
-    return await _impl(use_current_state, validate_hrt, hrt_variation, costing_method, custom_inputs,
-                      fecl3_dose_mg_L, naoh_dose_mg_L, na2co3_dose_mg_L)
+    from utils.job_manager import JobManager
+    import sys
+
+    # Build command for simulate_cli.py
+    cmd = [
+        sys.executable,
+        "utils/simulate_cli.py",
+        "--basis", "simulation_basis.json",
+        "--adm1-state", "simulation_adm1_state.json",
+        "--heuristic-config", "simulation_heuristic_config.json",
+        "--output-dir", "jobs/{job_id}",  # {job_id} will be replaced by JobManager
+    ]
+
+    # Add optional parameters
+    if not validate_hrt:
+        cmd.append("--no-validate-hrt")
+    if hrt_variation is not None and hrt_variation != 0.2:
+        cmd.extend(["--hrt-variation", str(hrt_variation)])
+    if fecl3_dose_mg_L > 0:
+        cmd.extend(["--fecl3-dose", str(fecl3_dose_mg_L)])
+    if naoh_dose_mg_L > 0:
+        cmd.extend(["--naoh-dose", str(naoh_dose_mg_L)])
+    if na2co3_dose_mg_L > 0:
+        cmd.extend(["--na2co3-dose", str(na2co3_dose_mg_L)])
+
+    # Execute in background
+    manager = JobManager()
+    job = await manager.execute(cmd=cmd, cwd=".")
+
+    return {
+        "job_id": job["id"],
+        "status": job["status"],
+        "message": "QSDsan simulation job started. Use get_job_status() to monitor progress.",
+        "command": " ".join(cmd[:2]) + " ...",
+        "estimated_time": "2-5 minutes",
+        "next_steps": [
+            f"Check status: get_job_status('{job['id']}')",
+            f"Get results: get_job_results('{job['id']}')"
+        ]
+    }
 
 @mcp.tool()
 async def estimate_chemical_dosing(
@@ -324,23 +535,100 @@ async def estimate_chemical_dosing(
     return await _impl(use_current_state, custom_params, objectives)
 
 
+# ==============================================================================
+# BACKGROUND JOB MANAGEMENT TOOLS
+# ==============================================================================
+
+@mcp.tool()
+async def get_job_status(job_id: str):
+    """
+    Get status of a background job.
+
+    Args:
+        job_id: Job identifier returned by asynchronous tools
+
+    Returns:
+        Dict with job_id, status ("starting", "running", "completed", "failed"),
+        elapsed_time, and progress hints
+    """
+    from utils.job_manager import JobManager
+    manager = JobManager()
+    return await manager.get_status(job_id)
+
+
+@mcp.tool()
+async def get_job_results(job_id: str):
+    """
+    Get results from a completed background job.
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        Dict with job_id, status, results (parsed JSON), and log file paths.
+        Returns error if job is not completed.
+    """
+    from utils.job_manager import JobManager
+    manager = JobManager()
+    return await manager.get_results(job_id)
+
+
+@mcp.tool()
+async def list_jobs(status_filter: str = None, limit: int = 20):
+    """
+    List all background jobs with optional status filter.
+
+    Args:
+        status_filter: Filter by status ("running", "completed", "failed", or None for all)
+        limit: Maximum number of jobs to return (default: 20)
+
+    Returns:
+        Dict with jobs list, total count, running jobs count, and max concurrent limit
+    """
+    from utils.job_manager import JobManager
+    manager = JobManager()
+    return await manager.list_jobs(status_filter, limit)
+
+
+@mcp.tool()
+async def terminate_job(job_id: str):
+    """
+    Terminate a running background job.
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        Dict with termination status and message
+    """
+    from utils.job_manager import JobManager
+    manager = JobManager()
+    return await manager.terminate_job(job_id)
+
+
 def main():
     """Run the MCP server."""
     logger.info("="*60)
     logger.info("Anaerobic Digester Design MCP Server")
     logger.info("="*60)
     logger.info("")
-    logger.info("Registered tools (10 total):")
-    logger.info("  1. elicit_basis_of_design - Collect design parameters")
-    logger.info("  2. load_adm1_state - Load ADM1 state from JSON file")
-    logger.info("  3. validate_adm1_state - Validate ADM1 state against composites")
-    logger.info("  4. compute_bulk_composites - Compute COD/TSS/VSS/TKN/TP from ADM1")
-    logger.info("  5. check_strong_ion_balance - Check cation/anion electroneutrality")
-    logger.info("  6. heuristic_sizing_ad - Size digester and auxiliary equipment")
-    logger.info("  7. simulate_ad_system_tool - Run QSDsan ADM1+sulfur simulation")
-    logger.info("  8. estimate_chemical_dosing - Estimate FeCl3/NaOH/Na2CO3 dosing")
-    logger.info("  9. get_design_state - View current design state and next steps")
-    logger.info(" 10. reset_design - Reset design state for new project")
+    logger.info("Registered tools (14 total):")
+    logger.info("  Design Workflow:")
+    logger.info("    1. elicit_basis_of_design - Collect design parameters")
+    logger.info("    2. load_adm1_state - Load ADM1 state from JSON file")
+    logger.info("    3. validate_adm1_state - Validate ADM1 state against composites")
+    logger.info("    4. compute_bulk_composites - Compute COD/TSS/VSS/TKN/TP from ADM1")
+    logger.info("    5. check_strong_ion_balance - Check cation/anion electroneutrality")
+    logger.info("    6. heuristic_sizing_ad - Size digester and auxiliary equipment")
+    logger.info("    7. simulate_ad_system_tool - Run QSDsan ADM1+sulfur simulation")
+    logger.info("    8. estimate_chemical_dosing - Estimate FeCl3/NaOH/Na2CO3 dosing")
+    logger.info("    9. get_design_state - View current design state and next steps")
+    logger.info("   10. reset_design - Reset design state for new project")
+    logger.info("  Background Job Management:")
+    logger.info("   11. get_job_status - Check status of background job")
+    logger.info("   12. get_job_results - Retrieve results from completed job")
+    logger.info("   13. list_jobs - List all background jobs")
+    logger.info("   14. terminate_job - Stop a running background job")
     logger.info("")
     logger.info("Note: Simulation output includes comprehensive stream analysis,")
     logger.info("      process health metrics, and sulfur balance data.")

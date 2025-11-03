@@ -16,6 +16,7 @@ import json
 import sys
 import argparse
 import logging
+import asyncio
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -32,64 +33,95 @@ logger = logging.getLogger(__name__)
 
 def validate_adm1_state_sync(adm1_state: dict, user_parameters: dict, tolerance: float, temperature_k: float) -> dict:
     """
-    Synchronous wrapper for validate_adm1_state_qsdsan.
+    Synchronous wrapper for validate_adm1_state from tools.validation.
 
     Imports QSDsan and runs validation synchronously (no async).
     """
-    logger.info("Loading QSDsan components...")
-    from utils.qsdsan_validation_sync import validate_adm1_state_sync as validate_impl
+    logger.info("Loading validation module...")
+    from tools.validation import validate_adm1_state
 
     logger.info("Running validation...")
-    result = validate_impl(
+    result = asyncio.run(validate_adm1_state(
         adm1_state=adm1_state,
         user_parameters=user_parameters,
-        tolerance=tolerance,
-        temperature_k=temperature_k
-    )
+        tolerance=tolerance
+    ))
 
     logger.info("Validation complete")
     return result
 
 
 def compute_bulk_composites_sync(adm1_state: dict, temperature_k: float) -> dict:
-    """Synchronous wrapper for calculate_composites_qsdsan."""
+    """
+    Compute bulk composites (COD, TSS, VSS, TKN, TP) directly from ADM1 state.
+
+    This function creates a QSDsan WasteStream with ADM1 concentrations and
+    reads the composite properties.
+    """
     logger.info("Loading QSDsan components...")
-    from utils.qsdsan_validation_sync import calculate_composites_sync
+    from utils.extract_qsdsan_sulfur_components import create_adm1_sulfur_cmps, set_global_components
+    from qsdsan import WasteStream
 
-    logger.info("Computing bulk composites...")
-    result = calculate_composites_sync(adm1_state, temperature_k)
+    # Set global components
+    cmps = create_adm1_sulfur_cmps()
+    set_global_components(cmps)
 
-    logger.info("Composites computed")
+    logger.info("Creating WasteStream from ADM1 state...")
+    # Build concentrations dict
+    conc_dict = {}
+    for key, value in adm1_state.items():
+        if key.startswith('S_') or key.startswith('X_'):
+            cmp_id = key[2:]  # Remove S_ or X_ prefix
+            if cmp_id in [c.ID for c in cmps]:
+                conc_dict[cmp_id] = value  # Already in kg/m3
+
+    # Create waste stream
+    ws = WasteStream('influent', T=temperature_k, units='kg/hr')
+    ws.set_flow_by_concentration(
+        flow_tot=1.0,  # 1 m3/hr for concentration basis
+        concentrations=conc_dict,
+        units='kg/m3'
+    )
+
+    logger.info("Computing composites...")
+    # QSDsan automatically computes .COD, .TSS, .VSS, .TN, .TP
+    result = {
+        "status": "success",
+        "composites": {
+            "COD_mg_L": ws.COD,  # Already in mg/L
+            "TSS_mg_L": ws.TSS,
+            "VSS_mg_L": ws.VSS,
+            "TKN_mg_L": ws.TN,  # Total nitrogen ≈ TKN for anaerobic
+            "TP_mg_L": ws.TP
+        },
+        "temperature_K": temperature_k
+    }
+
+    logger.info("Composites computed successfully")
     return result
 
 
-def check_ion_balance_sync(adm1_state: dict, target_ph: float, max_ph_deviation: float, temperature_k: float) -> dict:
+def check_ion_balance_sync(adm1_state: dict, target_ph: float, max_imbalance: float, temperature_k: float) -> dict:
     """
-    Solve for equilibrium pH and compare to target.
+    Check strong ion balance for electroneutrality.
 
     Args:
         adm1_state: ADM1 state dict (kg/m³)
         target_ph: Target pH from basis of design
-        max_ph_deviation: Maximum acceptable pH deviation (default: 0.5 units)
+        max_imbalance: Maximum acceptable imbalance percent (default: 5%)
         temperature_k: Temperature in Kelvin
 
     Returns:
-        Dictionary with equilibrium pH, target pH, deviation, and charge balance
+        Dictionary with balance check results
     """
-    logger.info("Solving for equilibrium pH using charge balance...")
-    from utils.qsdsan_validation_sync import check_charge_balance_sync
+    logger.info("Checking strong ion balance...")
+    from tools.validation import check_strong_ion_balance
 
-    result = check_charge_balance_sync(adm1_state, target_ph, temperature_k)
-
-    # Override balanced status with custom threshold if provided
-    if max_ph_deviation != 0.5:  # If user provided custom threshold
-        result['balanced'] = result['ph_deviation'] <= max_ph_deviation
-        if not result['balanced']:
-            result['message'] = (
-                f"Equilibrium pH ({result['equilibrium_ph']:.2f}) differs from target "
-                f"({target_ph:.2f}) by {result['ph_deviation']:.2f} units "
-                f"(max allowed: {max_ph_deviation:.2f})"
-            )
+    result = asyncio.run(check_strong_ion_balance(
+        adm1_state=adm1_state,
+        ph=target_ph,
+        max_imbalance_percent=max_imbalance
+    ))
 
     logger.info("Ion balance check complete")
     return result
@@ -97,6 +129,10 @@ def check_ion_balance_sync(adm1_state: dict, target_ph: float, max_ph_deviation:
 
 def main():
     parser = argparse.ArgumentParser(description='QSDsan validation CLI (subprocess isolation)')
+
+    # Global output directory option (for job isolation)
+    parser.add_argument('--output-dir', default='.', help='Directory for output files (default: current directory)')
+
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # validate_adm1_state command
@@ -121,6 +157,10 @@ def main():
     args = parser.parse_args()
 
     try:
+        # Create output directory
+        output_path = Path(args.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
         # Load ADM1 state from file
         with open(args.adm1_state, 'r') as f:
             adm1_state_raw = json.load(f)
@@ -139,17 +179,26 @@ def main():
         if args.command == 'validate':
             user_params = json.loads(args.user_params)
             result = validate_adm1_state_sync(adm1_state, user_params, args.tolerance, temperature_k)
+            output_file = output_path / 'validation_results.json'
 
         elif args.command == 'composites':
             result = compute_bulk_composites_sync(adm1_state, temperature_k)
+            output_file = output_path / 'composites_results.json'
 
         elif args.command == 'ion-balance':
             result = check_ion_balance_sync(adm1_state, args.ph, args.max_imbalance, temperature_k)
+            output_file = output_path / 'ion_balance_results.json'
 
         else:
             raise ValueError(f"Unknown command: {args.command}")
 
-        # Output result as JSON to stdout
+        # Write result to job-specific output file
+        with open(output_file, 'w') as f:
+            json.dump(result, f, indent=2)
+
+        logger.info(f"Results written to: {output_file}")
+
+        # Output result as JSON to stdout (for backward compatibility)
         print(json.dumps(result))
         sys.exit(0)
 

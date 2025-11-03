@@ -7,6 +7,40 @@
 - **heat-transfer-mcp**: Thermal analysis server (heat duty, tank heat loss, heat exchanger design)
 - **aerobic-treatment-kb**: Semantic search through Metcalf & Eddy knowledge base
 
+## Background Job Pattern (IMPORTANT)
+
+**Four computationally-heavy tools run as background jobs:**
+- `heuristic_sizing_ad` - Digester sizing with mixing/thermal analysis
+- `simulate_ad_system_tool` - QSDsan ADM1+sulfur simulation (2-5 minutes)
+- `validate_adm1_state` - Bulk composite validation
+- `compute_bulk_composites` - COD/TSS/VSS/TKN/TP calculation
+
+**These tools return immediately** (< 1 second) with a `job_id`. Use job management tools to monitor:
+
+```python
+# Tool returns job_id immediately
+result = mcp__anaerobic-design__heuristic_sizing_ad(...)
+job_id = result["job_id"]
+
+# Check status
+mcp__anaerobic-design__get_job_status(job_id=job_id)
+# Returns: {"status": "running", "elapsed_time_seconds": 15.2, ...}
+
+# Get results when completed
+mcp__anaerobic-design__get_job_results(job_id=job_id)
+# Returns: {"status": "completed", "results": {...}, ...}
+
+# List all jobs
+mcp__anaerobic-design__list_jobs(status_filter="running", limit=10)
+```
+
+**Job Statuses:**
+- `running` - Job is executing in background subprocess
+- `completed` - Job finished successfully, results available
+- `failed` - Job encountered error (check stderr.log in results)
+
+**Important:** DO NOT wait for heavy tools to return results. Always use the Background Job Pattern with `get_job_status()` and `get_job_results()`.
+
 ## Complete Workflow (DO NOT SKIP STEPS)
 
 ### Step 0: Reset
@@ -74,9 +108,13 @@ python utils/validate_cli.py validate \
     --tolerance 0.15
 ```
 
-### Step 4: Size
+### Step 4: Size (Background Job)
+
+**IMPORTANT:** This tool runs as a background job. It returns job_id immediately.
+
 ```python
-mcp__anaerobic-design__heuristic_sizing_ad(
+# Start sizing job
+result = mcp__anaerobic-design__heuristic_sizing_ad(
     use_current_basis=True,
     target_srt_days=20,
     # Tank configuration
@@ -99,6 +137,14 @@ mcp__anaerobic-design__heuristic_sizing_ad(
     feedstock_inlet_temp_c=10.0,
     insulation_R_value_si=1.76  # m²K/W (SI units)
 )
+
+job_id = result["job_id"]  # Extract job ID
+
+# Monitor progress
+mcp__anaerobic-design__get_job_status(job_id=job_id)
+
+# Retrieve results when completed
+sizing_results = mcp__anaerobic-design__get_job_results(job_id=job_id)
 ```
 
 **Eductor vs. Simple Pumped Mixing:**
@@ -197,27 +243,32 @@ mcp__heat-transfer-mcp__heat_exchanger_design(
 - Heat exchanger: Area [m²], shell/tube dimensions, LMTD [K]
 - **Total heat load**: Feedstock + Tank loss [kW]
 
-### Step 4b: Prepare Simulation Files (REQUIRED)
+### Step 5: Simulate (Background Job - REQUIRED)
+
+**IMPORTANT:** This tool runs as a background job and can take 2-5 minutes. It returns job_id immediately.
+
 ```python
-# This creates simulation_basis.json, simulation_adm1_state.json, simulation_heuristic_config.json
-mcp__anaerobic-design__simulate_ad_system_tool(
+# Start simulation job
+result = mcp__anaerobic-design__simulate_ad_system_tool(
     use_current_state=True,
     validate_hrt=True,
-    hrt_variation=0.2
+    hrt_variation=0.2,
+    fecl3_dose_mg_L=0,    # Optional: FeCl3 dosing
+    naoh_dose_mg_L=0,     # Optional: NaOH dosing
+    na2co3_dose_mg_L=0    # Optional: Na2CO3 dosing
 )
+
+job_id = result["job_id"]  # Extract job ID
+
+# Monitor progress (check every 30-60 seconds)
+mcp__anaerobic-design__get_job_status(job_id=job_id)
+# Returns: {"status": "running", "elapsed_time_seconds": 45, ...}
+
+# Retrieve results when completed (status = "completed")
+sim_results = mcp__anaerobic-design__get_job_results(job_id=job_id)
 ```
 
-### Step 5: Simulate (REQUIRED)
-
-**IMPORTANT:**
-- Do NOT use a timeout parameter - simulations can take several minutes to reach steady state
-- Do NOT use backslash line breaks in the command - run as a single line or the command will fail
-
-```bash
-/mnt/c/Users/hvksh/mcp-servers/venv312/Scripts/python.exe utils/simulate_cli.py --basis simulation_basis.json --adm1-state simulation_adm1_state.json --heuristic-config simulation_heuristic_config.json --hrt-variation 0.2
-```
-
-**Note:** The `simulate_ad_system_tool` in Step 4b creates `simulation_adm1_state.json` with enhanced inoculum (6× methanogen boost). This is different from the original `adm1_state.json`.
+**Note:** The simulation automatically creates files with enhanced inoculum (6× methanogen boost) for stable startup.
 
 **Optional Chemical Dosing Parameters:**
 
