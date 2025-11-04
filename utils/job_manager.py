@@ -444,12 +444,75 @@ class JobManager:
         }
 
         if results:
-            response["results"] = results
+            # Exclude time_series to avoid token limit (use get_timeseries_data tool instead)
+            if "time_series" in results:
+                response["time_series_available"] = True
+                response["time_series_note"] = "Time series data excluded from response. Use get_timeseries_data(job_id) to retrieve."
+                # Create filtered copy without time_series
+                results_filtered = {k: v for k, v in results.items() if k != "time_series"}
+                response["results"] = results_filtered
+            else:
+                response["results"] = results
             response["result_file"] = result_file_found
         else:
             response["warning"] = "No result JSON file found. Check stdout/stderr logs."
 
         return response
+
+    async def get_timeseries_data(self, job_id: str) -> dict:
+        """
+        Get time series data for a completed simulation job.
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            Dict with time series data or error
+        """
+        if job_id not in self.jobs:
+            return {"error": f"Job {job_id} not found"}
+
+        job = self.jobs[job_id]
+        job_dir = Path(job["job_dir"])
+
+        if job["status"] != "completed":
+            return {
+                "error": f"Job {job_id} not completed (status: {job['status']})",
+                "job_id": job_id,
+                "status": job["status"]
+            }
+
+        # Look for simulation results with time_series
+        result_path = job_dir / "simulation_results.json"
+        if not result_path.exists():
+            return {
+                "error": "simulation_results.json not found",
+                "job_id": job_id,
+                "note": "Time series data only available for simulation jobs"
+            }
+
+        try:
+            with open(result_path) as f:
+                results = json.load(f)
+
+            if "time_series" in results:
+                return {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "time_series": results["time_series"],
+                    "result_file": str(result_path)
+                }
+            else:
+                return {
+                    "error": "No time_series data in results",
+                    "job_id": job_id
+                }
+        except Exception as e:
+            logger.error(f"Failed to load time series from {result_path}: {e}")
+            return {
+                "error": f"Failed to parse results: {e}",
+                "job_id": job_id
+            }
 
     async def list_jobs(self, status_filter: Optional[str] = None, limit: int = 20) -> dict:
         """

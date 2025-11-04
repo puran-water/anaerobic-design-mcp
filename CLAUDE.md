@@ -32,6 +32,12 @@ mcp__anaerobic-design__get_job_results(job_id=job_id)
 
 # List all jobs
 mcp__anaerobic-design__list_jobs(status_filter="running", limit=10)
+
+# Terminate a running job (if needed)
+mcp__anaerobic-design__terminate_job(job_id=job_id)
+
+# Get time series data separately (excluded from get_job_results)
+mcp__anaerobic-design__get_timeseries_data(job_id=job_id)
 ```
 
 **Job Statuses:**
@@ -40,6 +46,11 @@ mcp__anaerobic-design__list_jobs(status_filter="running", limit=10)
 - `failed` - Job encountered error (check stderr.log in results)
 
 **Important:** DO NOT wait for heavy tools to return results. Always use the Background Job Pattern with `get_job_status()` and `get_job_results()`.
+
+**Token Efficiency:**
+- `get_job_results()` automatically excludes time_series data (~22K tokens) to stay under MCP's 25K token limit
+- Use `get_timeseries_data(job_id)` only if you specifically need time series for plotting/analysis
+- Large time series may still exceed limits - if so, read directly from `jobs/{job_id}/simulation_results.json`
 
 ## Complete Workflow (DO NOT SKIP STEPS)
 
@@ -269,6 +280,20 @@ sim_results = mcp__anaerobic-design__get_job_results(job_id=job_id)
 ```
 
 **Note:** The simulation automatically creates files with enhanced inoculum (6× methanogen boost) for stable startup.
+
+**IMPORTANT - Time Series Data:**
+- `get_job_results()` automatically **excludes time_series data** to avoid MCP token limits
+- The full results include time_series_available: true flag
+- To retrieve time series data (if needed for plotting/analysis):
+  ```python
+  # Time series data is large (~22K+ tokens), so it's excluded by default
+  # Use this separate tool only if you specifically need it:
+  mcp__anaerobic-design__get_timeseries_data(job_id=job_id)
+
+  # Note: Large time series may still exceed token limits
+  # In that case, read directly from file:
+  # jobs/{job_id}/simulation_results.json
+  ```
 
 **Optional Chemical Dosing Parameters:**
 

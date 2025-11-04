@@ -705,6 +705,30 @@ async def get_job_results(job_id: str):
 
 
 @mcp.tool()
+async def get_timeseries_data(job_id: str):
+    """
+    Get time series data from a completed simulation job.
+
+    Time series data is excluded from get_job_results() to avoid token limits.
+    Use this tool to retrieve the full time series data when needed.
+
+    Args:
+        job_id: Job identifier from simulate_ad_system_tool
+
+    Returns:
+        Dict with time_series data (148 days × many variables).
+        Returns error if job not found, not completed, or has no time series data.
+
+    Note:
+        Time series data is large (~22,000 tokens). Only call this tool if you
+        specifically need the detailed timeseries for plotting or analysis.
+    """
+    from utils.job_manager import JobManager
+    manager = JobManager()
+    return await manager.get_timeseries_data(job_id)
+
+
+@mcp.tool()
 async def list_jobs(status_filter: str = None, limit: int = 20):
     """
     List all background jobs with optional status filter.

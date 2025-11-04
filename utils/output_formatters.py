@@ -15,15 +15,17 @@ def calculate_vfa_alkalinity(stream_data, pH):
         Dict with VFA and alkalinity metrics
     """
     # Extract VFA components (acetate, propionate, butyrate, valerate)
+    # Components are nested in 'components' dict
+    components = stream_data.get('components', {})
     vfa_mg_l = (
-        stream_data.get('S_ac', 0) * 1000 +  # Convert kg/m3 to mg/L
-        stream_data.get('S_pro', 0) * 1000 +
-        stream_data.get('S_bu', 0) * 1000 +
-        stream_data.get('S_va', 0) * 1000
+        components.get('S_ac', 0) * 1000 +  # Convert kg/m3 to mg/L
+        components.get('S_pro', 0) * 1000 +
+        components.get('S_bu', 0) * 1000 +
+        components.get('S_va', 0) * 1000
     )
 
-    # Extract alkalinity (from inorganic carbon and ammonia)
-    alkalinity_meq_l = stream_data.get('alkalinity_meq_l', 0)
+    # Extract alkalinity (already in meq/L from stream data)
+    alkalinity_meq_l = stream_data.get('alkalinity', 0)
 
     # Calculate ratio
     vfa_alk_ratio = vfa_mg_l / alkalinity_meq_l if alkalinity_meq_l > 0 else 0
@@ -48,10 +50,11 @@ def format_performance_output(result, inf_vfa_alk, eff_vfa_alk):
     Returns:
         Dict with performance metrics
     """
-    influent = result.get('influent', {})
-    effluent = result.get('effluent', {})
-    biogas = result.get('biogas', {})
-    yields = result.get('yields', {})
+    # Extract from nested structure (streams/performance)
+    influent = result.get('streams', {}).get('influent', {})
+    effluent = result.get('streams', {}).get('effluent', {})
+    biogas = result.get('streams', {}).get('biogas', {})
+    yields = result.get('performance', {}).get('yields', {})
 
     return {
         'influent': {
@@ -72,17 +75,17 @@ def format_performance_output(result, inf_vfa_alk, eff_vfa_alk):
             'vfa_alk_ratio': eff_vfa_alk.get('vfa_alk_ratio', 0)
         },
         'biogas': {
-            'total_m3_d': biogas.get('Q_biogas_m3_d', 0),
-            'ch4_percent': biogas.get('CH4_percent', 0),
-            'co2_percent': biogas.get('CO2_percent', 0),
-            'h2s_ppm': biogas.get('H2S_ppm', 0)
+            'total_m3_d': biogas.get('flow_total', 0),
+            'ch4_percent': biogas.get('methane_percent', 0),
+            'co2_percent': biogas.get('co2_percent', 0),
+            'h2s_ppm': biogas.get('h2s_ppm', 0)
         },
         'performance': {
-            'cod_removal_percent': yields.get('COD_removal_efficiency', 0) * 100,
-            'specific_methane_yield_m3_kg_cod': yields.get('methane_yield_m3_kg_COD_removed', 0),
-            'specific_methane_yield_L_kg_cod': yields.get('methane_yield_L_kg_COD_removed', 0),
-            'net_biomass_yield_kg_vss_kg_cod': yields.get('net_biomass_yield_VSS', 0),
-            'net_biomass_yield_kg_tss_kg_cod': yields.get('net_biomass_yield_TSS', 0)
+            'cod_removal_percent': yields.get('COD_removal_efficiency', 0),  # Already in percent
+            'specific_methane_yield_m3_kg_cod': biogas.get('methane_yield_m3_kg_cod', 0),
+            'specific_methane_yield_L_kg_cod': biogas.get('methane_yield_m3_kg_cod', 0) * 1000,  # Convert m3 to L
+            'net_biomass_yield_kg_vss_kg_cod': yields.get('VSS_yield', 0),
+            'net_biomass_yield_kg_tss_kg_cod': yields.get('TSS_yield', 0)
         }
     }
 
