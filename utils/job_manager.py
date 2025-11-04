@@ -127,6 +127,13 @@ class JobManager:
 
         logger.info(f"Job recovery complete: {recovered} running, {stale} stale")
 
+        # Replay missed state updates (crash recovery)
+        from utils.job_state_reconciler import JobStateReconciler
+        reconciler = JobStateReconciler()
+        replayed = reconciler.replay_missed_updates(self.jobs)
+        if replayed > 0:
+            logger.info(f"Replayed {replayed} missed state updates")
+
     def _is_process_alive(self, pid: int) -> bool:
         """Check if a process with given PID is still running."""
         try:
@@ -147,7 +154,7 @@ class JobManager:
                 except Exception as e:
                     logger.error(f"Failed to terminate job {job_id}: {e}")
 
-    async def execute(self, cmd: List[str], cwd: str = ".", env: Optional[Dict[str, str]] = None) -> dict:
+    async def execute(self, cmd: List[str], cwd: str = ".", env: Optional[Dict[str, str]] = None, job_id: Optional[str] = None) -> dict:
         """
         Execute command in background subprocess.
 
@@ -155,14 +162,24 @@ class JobManager:
             cmd: Command as list (e.g., ["python", "script.py", "--arg", "value"])
             cwd: Working directory for subprocess
             env: Optional environment variables
+            job_id: Optional pre-determined job ID (for pre-created directories)
 
         Returns:
             Job metadata dict with job_id, status, command, etc.
         """
-        # Generate unique job ID
-        job_id = str(uuid.uuid4())[:8]
-        job_dir = self.jobs_dir / job_id
-        job_dir.mkdir(exist_ok=True)
+        # Generate or validate job ID
+        if job_id is None:
+            job_id = str(uuid.uuid4())[:8]
+            job_dir = self.jobs_dir / job_id
+            job_dir.mkdir(exist_ok=True)
+        else:
+            # Guardrail: Check for collision (caller must have created directory already)
+            job_dir = self.jobs_dir / job_id
+            if job_id in self.jobs:
+                raise ValueError(f"Job ID {job_id} already exists in active jobs")
+            if not job_dir.exists():
+                raise ValueError(f"Job directory {job_dir} must exist when providing custom job_id")
+            # Caller already created directory - don't create again
 
         # Replace {job_id} placeholder in command
         cmd_with_id = [arg.replace("{job_id}", job_id) for arg in cmd]
@@ -257,6 +274,14 @@ class JobManager:
                     job["error"] = f.read(500)
 
             logger.info(f"Job {job_id} {job['status']} with exit code {exit_code}")
+
+            # Apply state patch if job completed successfully
+            if job["status"] == "completed" and "state_patch" in job:
+                from utils.job_state_reconciler import JobStateReconciler
+                reconciler = JobStateReconciler()
+                if reconciler.apply(job):
+                    job["state_applied"] = True
+                    logger.info(f"State patch applied for job {job_id}")
 
         except Exception as e:
             job["status"] = "failed"

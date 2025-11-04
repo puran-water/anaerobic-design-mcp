@@ -6,19 +6,19 @@ This script handles the heavy QSDsan operations outside the MCP server
 to avoid STDIO connection timeouts during the 18-second component loading.
 """
 
-# CRITICAL FIX: Patch fluids.numerics BEFORE any QSDsan imports
-# thermo package (dependency of thermosteam → biosteam → qsdsan) expects
-# numerics.PY37 which was removed in fluids 1.2.0
-# Since we're on Python 3.12, PY37 should always be True
-import fluids.numerics
-if not hasattr(fluids.numerics, 'PY37'):
-    fluids.numerics.PY37 = True  # Python 3.12 > 3.7
-
 import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Apply runtime patches BEFORE importing QSDsan/biosteam
+from utils.runtime_patches import apply_all_patches
+apply_all_patches()
+
 import json
 import argparse
 import logging
-from pathlib import Path
 from datetime import datetime
 
 # Set up logging
@@ -89,7 +89,7 @@ def run_simulation(
 
         logger.info(f"Basis: Q={basis.get('Q', 'N/A')} m3/d, T={basis.get('Temp', 'N/A')} K")
         logger.info(f"ADM1 state: {len(adm1_state)} components")
-        logger.info(f"Design SRT: {heuristic_config['digester']['srt_days']} days (HRT in heuristic: {heuristic_config['digester']['HRT_days']} days)")
+        logger.info(f"Design SRT: {heuristic_config['digester']['srt_days']} days (HRT in heuristic: {heuristic_config['digester']['hrt_days']} days)")
 
         # Import simulation modules (this takes ~18 seconds on first run)
         logger.info("Loading QSDsan components (may take ~18 seconds)...")
@@ -224,8 +224,8 @@ def run_simulation(
             yields_check = analyze_biomass_yields(inf_c, eff_c, system=sys_c)
 
             validation_results = {
-                "hrt_design": heuristic_config['digester']['HRT_days'],
-                "hrt_check": heuristic_config['digester']['HRT_days'] * (1 + hrt_variation),
+                "hrt_design": heuristic_config['digester']['hrt_days'],
+                "hrt_check": heuristic_config['digester']['hrt_days'] * (1 + hrt_variation),
                 "converged_at_design": converged_at_d,
                 "converged_at_check": converged_at_c,
                 "status_design": status_d,

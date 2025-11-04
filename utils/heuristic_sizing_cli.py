@@ -25,6 +25,13 @@ import logging
 import sys
 from pathlib import Path
 
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Apply runtime patches BEFORE importing QSDsan/biosteam
+from utils.runtime_patches import apply_all_patches
+apply_all_patches()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +47,12 @@ def main():
     )
 
     # Required arguments
+    parser.add_argument(
+        "--input-dir",
+        type=str,
+        required=True,
+        help="Input directory containing basis.json (e.g., jobs/abc123)"
+    )
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -140,21 +153,31 @@ def main():
     logger.info(f"Biogas application: {args.biogas_application}")
 
     try:
+        # Load data from JSON files (not design_state!)
+        logger.info("Loading input data from JSON files...")
+        input_dir = Path(args.input_dir)
+        basis_file = input_dir / "basis.json"
+
+        if not basis_file.exists():
+            logger.error(f"Input file not found: {basis_file}")
+            logger.error("The server should have created this file before launching subprocess.")
+            sys.exit(1)
+
+        with open(basis_file) as f:
+            basis_of_design = json.load(f)
+
+        # Validate basis has required keys
+        required_keys = ['feed_flow_m3d', 'cod_mg_l']
+        missing = [k for k in required_keys if k not in basis_of_design]
+        if missing:
+            logger.error(f"Missing required keys in basis: {missing}")
+            sys.exit(1)
+
+        logger.info(f"Loaded basis_of_design: Q={basis_of_design['feed_flow_m3d']} m³/d, COD={basis_of_design['cod_mg_l']} mg/L")
+
         # Import sizing function (heavy imports happen here)
         logger.info("Loading sizing modules (this may take 10-30 seconds)...")
         from utils.heuristic_sizing import perform_heuristic_sizing
-        from utils.design_state import design_state
-
-        # Check if design state has basis of design
-        if not design_state.get("basis_of_design"):
-            logger.error("No basis of design found in design state!")
-            logger.error("Please run elicit_basis_of_design() first.")
-            sys.exit(1)
-
-        if not design_state.get("adm1_state"):
-            logger.error("No ADM1 state found in design state!")
-            logger.error("Please run load_adm1_state() first.")
-            sys.exit(1)
 
         logger.info("Modules loaded successfully")
 
@@ -162,6 +185,7 @@ def main():
         logger.info("Starting heuristic sizing calculation...")
 
         results = perform_heuristic_sizing(
+            basis_of_design=basis_of_design,  # CRITICAL: Pass loaded basis as first param
             target_srt_days=args.target_srt,
             mixing_type=args.mixing_type,
             biogas_application=args.biogas_application,

@@ -252,8 +252,10 @@ async def validate_adm1_state(user_parameters: dict, tolerance: float = 0.10, us
     """
     from utils.job_manager import JobManager
     from core.state import design_state
+    from pathlib import Path
     import sys
     import json
+    import uuid
 
     if use_current_adm1:
         adm1_state = design_state.adm1_state
@@ -262,20 +264,39 @@ async def validate_adm1_state(user_parameters: dict, tolerance: float = 0.10, us
     else:
         return {"status": "error", "message": "Must set use_current_adm1=True or provide adm1_state directly"}
 
+    # Generate job_id and create directory (caller is responsible when passing custom job_id)
+    job_id = str(uuid.uuid4())[:8]
+    job_dir = Path("jobs") / job_id
+
+    # Ensure parent jobs/ directory exists
+    Path("jobs").mkdir(exist_ok=True)
+
+    # Create job directory for input files (JobManager expects this to exist for custom job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with open(job_dir / "adm1_state.json", "w") as f:
+            json.dump(adm1_state, f, indent=2, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        # Clean up on serialization failure
+        import shutil
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return {"status": "error", "message": f"Failed to serialize ADM1 state: {e}"}
+
     # Build command for validate_cli.py
     cmd = [
         sys.executable,
         "utils/validate_cli.py",
-        "--output-dir", "jobs/{job_id}",  # Must come before subcommand
+        "--output-dir", str(job_dir),
         "validate",
-        "--adm1-state", "adm1_state.json",
+        "--adm1-state", str(job_dir / "adm1_state.json"),
         "--user-params", json.dumps(user_parameters),
         "--tolerance", str(tolerance),
     ]
 
-    # Execute in background
+    # Execute in background with pre-created job_id
     manager = JobManager()
-    job = await manager.execute(cmd=cmd, cwd=".")
+    job = await manager.execute(cmd=cmd, cwd=".", job_id=job_id)
 
     return {
         "job_id": job["id"],
@@ -397,13 +418,47 @@ async def heuristic_sizing_ad(
     IMPORTANT: This tool now runs in background. Do NOT wait for results - use get_job_status(job_id) instead.
     """
     from utils.job_manager import JobManager
+    from core.state import design_state
+    from pathlib import Path
     import sys
+    import json
+    import uuid
+
+    # Validate design_state has required data
+    if use_current_basis:
+        if not design_state.basis_of_design:
+            return {"status": "error", "message": "No basis_of_design in design_state. Run elicit_basis_of_design first."}
+    elif custom_basis is None:
+        return {"status": "error", "message": "Must provide custom_basis or set use_current_basis=True"}
+
+    # Pre-create job directory
+    job_id = str(uuid.uuid4())[:8]
+    job_dir = Path("jobs") / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Write input files
+        basis_to_use = design_state.basis_of_design if use_current_basis else custom_basis
+        with open(job_dir / "basis.json", "w") as f:
+            json.dump(basis_to_use, f, indent=2, allow_nan=False)
+
+        # Optional: Write ADM1 state if available (sizing may use biomass data)
+        if design_state.adm1_state:
+            with open(job_dir / "adm1_state.json", "w") as f:
+                json.dump(design_state.adm1_state, f, indent=2, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        # Clean up on serialization failure
+        for file in job_dir.glob("*.json"):
+            file.unlink()
+        job_dir.rmdir()
+        return {"status": "error", "message": f"Serialization failed: {e}"}
 
     # Build command for CLI wrapper
     cmd = [
         sys.executable,  # Use same Python interpreter as server
         "utils/heuristic_sizing_cli.py",
-        "--output-dir", "jobs/{job_id}",  # {job_id} will be replaced by JobManager
+        "--input-dir", str(job_dir),
+        "--output-dir", str(job_dir),
     ]
 
     # Add optional parameters
@@ -428,9 +483,20 @@ async def heuristic_sizing_ad(
     if biogas_discharge_pressure_kpa is not None:
         cmd.extend(["--biogas-discharge-pressure", str(biogas_discharge_pressure_kpa)])
 
-    # Execute in background
+    # Register state patch for automatic design_state hydration
+    state_patch = {
+        "field": "heuristic_config",
+        "result_file": "results.json",
+        "json_pointer": None  # Load entire results file
+    }
+
+    # Execute in background with pre-created job_id
     manager = JobManager()
-    job = await manager.execute(cmd=cmd, cwd=".")
+    job = await manager.execute(cmd=cmd, cwd=".", job_id=job_id)
+
+    # Add state_patch to job metadata (JobManager will use this after completion)
+    job["state_patch"] = state_patch
+    manager._save_job_metadata(job)
 
     return {
         "job_id": job["id"],
@@ -469,16 +535,70 @@ async def simulate_ad_system_tool(
     IMPORTANT: This tool now runs in background. Do NOT wait for results - use get_job_status(job_id) instead.
     """
     from utils.job_manager import JobManager
+    from core.state import design_state
+    from pathlib import Path
     import sys
+    import json
+    import uuid
 
-    # Build command for simulate_cli.py
+    # Validate design_state has all required dicts
+    if use_current_state:
+        missing = []
+        if not design_state.basis_of_design:
+            missing.append("basis_of_design")
+        if not design_state.adm1_state:
+            missing.append("adm1_state")
+        if not design_state.heuristic_config:
+            missing.append("heuristic_config")
+
+        if missing:
+            return {"status": "error", "message": f"Missing design_state data: {missing}. Run sizing first."}
+    else:
+        if not custom_inputs:
+            return {"status": "error", "message": "Must provide custom_inputs or set use_current_state=True"}
+
+    # Pre-create job directory
+    job_id = str(uuid.uuid4())[:8]
+    job_dir = Path("jobs") / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Write all three input files
+        if use_current_state:
+            # Transform basis schema for simulation (expects Q and Temp in K)
+            basis_for_sim = {
+                "Q": design_state.basis_of_design.get("feed_flow_m3d", design_state.basis_of_design.get("Q", 1000)),
+                "Temp": design_state.basis_of_design.get("temperature_c", 35) + 273.15,  # Convert °C to K
+                # Pass through other parameters
+                **{k: v for k, v in design_state.basis_of_design.items() if k not in ["feed_flow_m3d", "temperature_c"]}
+            }
+            with open(job_dir / "basis.json", "w") as f:
+                json.dump(basis_for_sim, f, indent=2, allow_nan=False)
+            with open(job_dir / "adm1_state.json", "w") as f:
+                json.dump(design_state.adm1_state, f, indent=2, allow_nan=False)
+            with open(job_dir / "heuristic_config.json", "w") as f:
+                json.dump(design_state.heuristic_config, f, indent=2, allow_nan=False)
+        else:
+            # Use custom inputs
+            for key, filename in [("basis", "basis.json"), ("adm1_state", "adm1_state.json"), ("heuristic_config", "heuristic_config.json")]:
+                if key in custom_inputs:
+                    with open(job_dir / filename, "w") as f:
+                        json.dump(custom_inputs[key], f, indent=2, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        # Clean up on serialization failure
+        for file in job_dir.glob("*.json"):
+            file.unlink()
+        job_dir.rmdir()
+        return {"status": "error", "message": f"Serialization failed: {e}"}
+
+    # Build command for simulate_cli.py with job-specific file paths
     cmd = [
         sys.executable,
         "utils/simulate_cli.py",
-        "--basis", "simulation_basis.json",
-        "--adm1-state", "simulation_adm1_state.json",
-        "--heuristic-config", "simulation_heuristic_config.json",
-        "--output-dir", "jobs/{job_id}",  # {job_id} will be replaced by JobManager
+        "--basis", str(job_dir / "basis.json"),
+        "--adm1-state", str(job_dir / "adm1_state.json"),
+        "--heuristic-config", str(job_dir / "heuristic_config.json"),
+        "--output-dir", str(job_dir),
     ]
 
     # Add optional parameters
@@ -493,9 +613,20 @@ async def simulate_ad_system_tool(
     if na2co3_dose_mg_L > 0:
         cmd.extend(["--na2co3-dose", str(na2co3_dose_mg_L)])
 
-    # Execute in background
+    # Register state patch for automatic design_state hydration
+    state_patch = {
+        "field": "simulation_results",
+        "result_file": "simulation_results.json",
+        "json_pointer": None  # Load entire results file
+    }
+
+    # Execute in background with pre-created job_id
     manager = JobManager()
-    job = await manager.execute(cmd=cmd, cwd=".")
+    job = await manager.execute(cmd=cmd, cwd=".", job_id=job_id)
+
+    # Add state_patch to job metadata (JobManager will use this after completion)
+    job["state_patch"] = state_patch
+    manager._save_job_metadata(job)
 
     return {
         "job_id": job["id"],

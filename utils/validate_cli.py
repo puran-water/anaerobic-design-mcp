@@ -22,6 +22,10 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Apply runtime patches BEFORE importing QSDsan/biosteam
+from utils.runtime_patches import apply_all_patches
+apply_all_patches()
+
 # Configure logging to stderr (stdout is for JSON output)
 logging.basicConfig(
     level=logging.INFO,
@@ -33,22 +37,72 @@ logger = logging.getLogger(__name__)
 
 def validate_adm1_state_sync(adm1_state: dict, user_parameters: dict, tolerance: float, temperature_k: float) -> dict:
     """
-    Synchronous wrapper for validate_adm1_state from tools.validation.
+    Direct validation using QSDsan WasteStream.
 
-    Imports QSDsan and runs validation synchronously (no async).
+    Computes bulk composites (COD, TSS, VSS, TKN, TP) from ADM1 components
+    and compares to target values.
     """
-    logger.info("Loading validation module...")
-    from tools.validation import validate_adm1_state
+    logger.info("Loading QSDsan components...")
+    from utils.extract_qsdsan_sulfur_components import create_adm1_sulfur_cmps, set_global_components
+    from qsdsan import WasteStream
 
-    logger.info("Running validation...")
-    result = asyncio.run(validate_adm1_state(
-        adm1_state=adm1_state,
-        user_parameters=user_parameters,
-        tolerance=tolerance
-    ))
+    # Set global components
+    cmps = create_adm1_sulfur_cmps()
+    set_global_components(cmps)
 
-    logger.info("Validation complete")
-    return result
+    logger.info("Building WasteStream from ADM1 state...")
+    # Build concentration dict - component IDs include the S_/X_ prefix
+    conc_dict = {}
+    cmp_ids = [c.ID for c in cmps]
+    for key, value in adm1_state.items():
+        if key.startswith(('S_', 'X_')):
+            # Component IDs in QSDan include the full prefix (e.g., 'S_su', not 'su')
+            if key in cmp_ids:
+                conc_dict[key] = value  # kg/m3
+
+    # Create WasteStream and compute composites
+    ws = WasteStream('influent', T=temperature_k, units='kg/hr')
+    ws.set_flow_by_concentration(
+        flow_tot=1.0,  # 1 m3/hr for concentration basis
+        concentrations=conc_dict,
+        units=('m3/hr', 'kg/m3')  # Tuple: (flow_unit, concentration_unit)
+    )
+
+    logger.info("Computing bulk composites...")
+    # Calculate composites from WasteStream
+    # Note: TSS and VSS are methods, not properties
+    calculated = {
+        'cod_mg_l': ws.COD,
+        'tss_mg_l': ws.get_TSS(),  # Method, not property
+        'vss_mg_l': ws.get_VSS(),  # Method, not property
+        'tkn_mg_l': ws.TN,  # Total nitrogen ≈ TKN for anaerobic
+        'tp_mg_l': ws.TP
+    }
+
+    logger.info("Comparing calculated vs target values...")
+    # Compare calculated vs target (with divide-by-zero protection)
+    deviations = {}
+    for k in calculated:
+        if k in user_parameters and user_parameters[k] > 0:
+            deviation = abs(calculated[k] - user_parameters[k]) / user_parameters[k]
+            deviations[k] = deviation
+        else:
+            # Skip parameters not provided or with zero values
+            deviations[k] = None
+
+    # Check if all deviations pass tolerance (ignore None values)
+    valid_deviations = {k: v for k, v in deviations.items() if v is not None}
+    passed = all(dev <= tolerance for dev in valid_deviations.values())
+
+    logger.info(f"Validation complete: {'PASSED' if passed else 'FAILED'}")
+    return {
+        "status": "success",
+        "valid": passed,
+        "calculated": calculated,
+        "target": user_parameters,
+        "deviations": deviations,
+        "tolerance": tolerance
+    }
 
 
 def compute_bulk_composites_sync(adm1_state: dict, temperature_k: float) -> dict:
@@ -67,30 +121,31 @@ def compute_bulk_composites_sync(adm1_state: dict, temperature_k: float) -> dict
     set_global_components(cmps)
 
     logger.info("Creating WasteStream from ADM1 state...")
-    # Build concentrations dict
+    # Build concentrations dict - component IDs include the S_/X_ prefix
     conc_dict = {}
+    cmp_ids = [c.ID for c in cmps]
     for key, value in adm1_state.items():
-        if key.startswith('S_') or key.startswith('X_'):
-            cmp_id = key[2:]  # Remove S_ or X_ prefix
-            if cmp_id in [c.ID for c in cmps]:
-                conc_dict[cmp_id] = value  # Already in kg/m3
+        if key.startswith(('S_', 'X_')):
+            # Component IDs in QSDsan include the full prefix (e.g., 'S_su', not 'su')
+            if key in cmp_ids:
+                conc_dict[key] = value  # Already in kg/m3
 
     # Create waste stream
     ws = WasteStream('influent', T=temperature_k, units='kg/hr')
     ws.set_flow_by_concentration(
         flow_tot=1.0,  # 1 m3/hr for concentration basis
         concentrations=conc_dict,
-        units='kg/m3'
+        units=('m3/hr', 'kg/m3')  # Tuple: (flow_unit, concentration_unit)
     )
 
     logger.info("Computing composites...")
-    # QSDsan automatically computes .COD, .TSS, .VSS, .TN, .TP
+    # QSDsan provides COD, TN, TP as properties; TSS and VSS are methods
     result = {
         "status": "success",
         "composites": {
             "COD_mg_L": ws.COD,  # Already in mg/L
-            "TSS_mg_L": ws.TSS,
-            "VSS_mg_L": ws.VSS,
+            "TSS_mg_L": ws.get_TSS(),  # Method, not property
+            "VSS_mg_L": ws.get_VSS(),  # Method, not property
             "TKN_mg_L": ws.TN,  # Total nitrogen ≈ TKN for anaerobic
             "TP_mg_L": ws.TP
         },
