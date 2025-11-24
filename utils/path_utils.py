@@ -2,7 +2,7 @@
 Path normalization utilities for Windows/WSL interoperability.
 
 When running in WSL but using Windows Python (e.g., from a Windows venv),
-paths need to be converted from Windows format (C:\Users\...) to WSL format
+paths need to be converted from Windows format (C:/Users/...) to WSL format
 (/mnt/c/Users/...) for subprocess execution.
 """
 
@@ -27,13 +27,13 @@ def is_wsl() -> bool:
 
 
 def normalize_path_for_wsl(path: Union[str, Path, None]) -> str:
-    """
+    r"""
     Convert Windows paths to WSL paths if running in WSL.
 
     Examples:
-        C:\\Users\\hvksh\\... → /mnt/c/Users/hvksh/...
-        D:\\Projects\\... → /mnt/d/Projects/...
-        jobs\\a9eaada2\\file.json → jobs/a9eaada2/file.json
+        C:\Users\hvksh\... -> /mnt/c/Users/hvksh/...
+        D:\Projects\... -> /mnt/d/Projects/...
+        jobs\a9eaada2\file.json -> jobs/a9eaada2/file.json
 
     Args:
         path: A file path (string or Path object)
