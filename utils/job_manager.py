@@ -33,6 +33,8 @@ import uuid
 from pathlib import Path
 from typing import Optional, Dict, List
 
+from utils.path_utils import normalize_path_for_wsl
+
 logger = logging.getLogger(__name__)
 
 
@@ -208,10 +210,14 @@ class JobManager:
                 if env:
                     proc_env.update(env)
 
+                # Normalize paths for WSL/Windows interoperability
+                cmd_normalized = [normalize_path_for_wsl(arg) for arg in cmd_with_id]
+                cwd_normalized = normalize_path_for_wsl(cwd)
+
                 # Start subprocess
                 proc = await asyncio.create_subprocess_exec(
-                    *cmd_with_id,
-                    cwd=cwd,
+                    *cmd_normalized,
+                    cwd=cwd_normalized,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=proc_env
@@ -318,6 +324,16 @@ class JobManager:
             return {"error": f"Job {job_id} not found"}
 
         job = self.jobs[job_id]
+
+        # Check for dead process (subprocess crashed without proper cleanup)
+        if job["status"] == "running":
+            pid = job.get("pid")
+            if pid and not self._is_process_alive(pid):
+                logger.warning(f"Job {job_id}: Process {pid} terminated unexpectedly")
+                job["status"] = "failed"
+                job["error"] = "Process terminated unexpectedly (subprocess crash)"
+                job["completed_at"] = time.time()
+                self._save_job_metadata(job)
 
         # Calculate elapsed time
         elapsed = time.time() - job["started_at"]

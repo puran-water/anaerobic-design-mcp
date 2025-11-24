@@ -8,7 +8,7 @@ Provides tools for:
 - Parameter elicitation and feedstock characterization (via Codex MCP)
 - ADM1 state validation (ion balance, bulk composites, precipitation risk)
 - Heuristic sizing (digesters, MBR, auxiliary equipment)
-- QSDsan dynamic simulation with ADM1+sulfur (30 components)
+- QSDsan dynamic simulation with mADM1 model (63 components)
 - Sulfur analysis and H2S treatment evaluation
 """
 
@@ -16,6 +16,9 @@ import os
 import sys
 import logging
 from pathlib import Path
+
+# Import path normalization utilities for Windows/WSL interoperability
+from utils.path_utils import get_python_executable, normalize_path_for_wsl
 
 # Set required environment variables
 if 'LOCALAPPDATA' not in os.environ:
@@ -283,13 +286,13 @@ async def validate_adm1_state(user_parameters: dict, tolerance: float = 0.10, us
         shutil.rmtree(job_dir, ignore_errors=True)
         return {"status": "error", "message": f"Failed to serialize ADM1 state: {e}"}
 
-    # Build command for validate_cli.py
+    # Build command for validate_cli.py (with WSL path normalization)
     cmd = [
-        sys.executable,
+        get_python_executable(),
         "utils/validate_cli.py",
-        "--output-dir", str(job_dir),
+        "--output-dir", normalize_path_for_wsl(str(job_dir)),
         "validate",
-        "--adm1-state", str(job_dir / "adm1_state.json"),
+        "--adm1-state", normalize_path_for_wsl(str(job_dir / "adm1_state.json")),
         "--user-params", json.dumps(user_parameters),
         "--tolerance", str(tolerance),
     ]
@@ -336,11 +339,11 @@ async def compute_bulk_composites(temperature_c: float = 35.0, use_current_adm1:
     else:
         return {"status": "error", "message": "Must set use_current_adm1=True"}
 
-    # Build command for validate_cli.py composites subcommand
+    # Build command for validate_cli.py composites subcommand (with WSL path normalization)
     cmd = [
-        sys.executable,
+        get_python_executable(),
         "utils/validate_cli.py",
-        "--output-dir", "jobs/{job_id}",  # Must come before subcommand
+        "--output-dir", "jobs/{job_id}",  # Must come before subcommand (placeholder replaced by job_manager)
         "composites",
         "--adm1-state", "adm1_state.json",
         "--temperature-c", str(temperature_c),
@@ -453,12 +456,12 @@ async def heuristic_sizing_ad(
         job_dir.rmdir()
         return {"status": "error", "message": f"Serialization failed: {e}"}
 
-    # Build command for CLI wrapper
+    # Build command for CLI wrapper (with WSL path normalization)
     cmd = [
-        sys.executable,  # Use same Python interpreter as server
+        get_python_executable(),  # Use same Python interpreter as server (normalized for WSL)
         "utils/heuristic_sizing_cli.py",
-        "--input-dir", str(job_dir),
-        "--output-dir", str(job_dir),
+        "--input-dir", normalize_path_for_wsl(str(job_dir)),
+        "--output-dir", normalize_path_for_wsl(str(job_dir)),
     ]
 
     # Add optional parameters
@@ -521,7 +524,7 @@ async def simulate_ad_system_tool(
     na2co3_dose_mg_L: float = 0
 ):
     """
-    Run QSDsan dynamic simulation with ADM1+sulfur model (30 components).
+    Run QSDsan dynamic simulation with mADM1 model (63 components).
 
     Returns comprehensive results including:
     - Stream analysis (influent, effluent, biogas)
@@ -591,14 +594,14 @@ async def simulate_ad_system_tool(
         job_dir.rmdir()
         return {"status": "error", "message": f"Serialization failed: {e}"}
 
-    # Build command for simulate_cli.py with job-specific file paths
+    # Build command for simulate_cli.py with job-specific file paths (with WSL path normalization)
     cmd = [
-        sys.executable,
+        get_python_executable(),
         "utils/simulate_cli.py",
-        "--basis", str(job_dir / "basis.json"),
-        "--adm1-state", str(job_dir / "adm1_state.json"),
-        "--heuristic-config", str(job_dir / "heuristic_config.json"),
-        "--output-dir", str(job_dir),
+        "--basis", normalize_path_for_wsl(str(job_dir / "basis.json")),
+        "--adm1-state", normalize_path_for_wsl(str(job_dir / "adm1_state.json")),
+        "--heuristic-config", normalize_path_for_wsl(str(job_dir / "heuristic_config.json")),
+        "--output-dir", normalize_path_for_wsl(str(job_dir)),
     ]
 
     # Add optional parameters
@@ -767,7 +770,7 @@ def main():
     logger.info("Anaerobic Digester Design MCP Server")
     logger.info("="*60)
     logger.info("")
-    logger.info("Registered tools (14 total):")
+    logger.info("Registered tools (15 total):")
     logger.info("  Design Workflow:")
     logger.info("    1. elicit_basis_of_design - Collect design parameters")
     logger.info("    2. load_adm1_state - Load ADM1 state from JSON file")
@@ -775,15 +778,16 @@ def main():
     logger.info("    4. compute_bulk_composites - Compute COD/TSS/VSS/TKN/TP from ADM1")
     logger.info("    5. check_strong_ion_balance - Check cation/anion electroneutrality")
     logger.info("    6. heuristic_sizing_ad - Size digester and auxiliary equipment")
-    logger.info("    7. simulate_ad_system_tool - Run QSDsan ADM1+sulfur simulation")
+    logger.info("    7. simulate_ad_system_tool - Run QSDsan mADM1 simulation")
     logger.info("    8. estimate_chemical_dosing - Estimate FeCl3/NaOH/Na2CO3 dosing")
     logger.info("    9. get_design_state - View current design state and next steps")
     logger.info("   10. reset_design - Reset design state for new project")
     logger.info("  Background Job Management:")
     logger.info("   11. get_job_status - Check status of background job")
     logger.info("   12. get_job_results - Retrieve results from completed job")
-    logger.info("   13. list_jobs - List all background jobs")
-    logger.info("   14. terminate_job - Stop a running background job")
+    logger.info("   13. get_timeseries_data - Retrieve time series data from simulation")
+    logger.info("   14. list_jobs - List all background jobs")
+    logger.info("   15. terminate_job - Stop a running background job")
     logger.info("")
     logger.info("Note: Simulation output includes comprehensive stream analysis,")
     logger.info("      process health metrics, and sulfur balance data.")
