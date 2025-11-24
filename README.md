@@ -1,25 +1,26 @@
 # Anaerobic Design MCP Server
 
-Production-ready MCP (Model Context Protocol) server for anaerobic digester design using the complete mADM1 (Modified ADM1) process model with 62 state variables.
+Production-ready MCP (Model Context Protocol) server for anaerobic digester design using the complete mADM1 (Modified ADM1) process model with 63 components (62 state variables + H2O).
 
 ## Overview
 
 This server provides an end-to-end workflow for designing anaerobic digesters treating high-strength wastewater, from feedstock characterization through dynamic simulation. It leverages QSDsan's production-grade mADM1 model with phosphorus/sulfur/iron extensions for comprehensive nutrient recovery and biogas production modeling.
 
-**Status**: Production-Ready + Enhanced Design Tools (2025-10-30)
+**Status**: Production-Ready + Background Job Pattern (2025-11-22)
 
 ## Key Features
 
 ### Core Process Model
-- **Complete mADM1 Model (62 Components)**: Full Modified ADM1 with P/S/Fe extensions
+- **Complete mADM1 Model (63 Components)**: Full Modified ADM1 with P/S/Fe extensions
   - 27 core ADM1 components (sugars, amino acids, VFAs, biomass)
   - 3 EBPR components (X_PHA, X_PP, X_PAO)
   - 7 sulfur species (SO4, H2S, 4 SRB types, S0)
   - 9 iron species (Fe3+, Fe2+, 7 HFO variants)
   - 13 mineral precipitates (struvite, HAP, FeS, etc.)
   - 4 additional cations (K, Mg, Ca, Al)
+  - 1 solvent (H2O as component index 62)
 
-- **AI-Powered ADM1 State Generation**: Codex MCP server converts feedstock descriptions into complete 62-component states
+- **AI-Powered ADM1 State Generation**: Codex MCP server converts feedstock descriptions into complete 63-component states
 
 - **Thermodynamically Rigorous pH Solver**: Production charge balance with all ionic species
 
@@ -35,6 +36,13 @@ This server provides an end-to-end workflow for designing anaerobic digesters tr
   - WEF MOP-8 validated correlations
   - Power-law parameters (Baudez et al. 2011)
   - Temperature corrections
+
+- **Substrate-Aware Biomass Yield** (`utils/heuristic_sizing.py:80-267`): Complete ADM1 pathway analysis
+  - Accounts for multi-step metabolism (not just first-step yields)
+  - Cascading yields: substrate → intermediates → acetate/H₂ → CH₄
+  - Substrate-specific yields: carbs (0.116), proteins (0.106), lipids (0.073-0.078) kg TSS/kg COD
+  - Based on ADM1 stoichiometry and product split fractions
+  - **Known Limitation**: Does not account for SRT-dependent endogenous decay (under investigation)
 
 - **Thermal Integration**: Direct MCP access to heat-transfer-mcp server
   - Feedstock heating load calculations
@@ -107,7 +115,7 @@ mcp__anaerobic-design__elicit_basis_of_design(
 **Step 2: Generate ADM1 state using Codex** (CRITICAL - Do not skip!)
 
 ```python
-# Call Codex MCP to generate complete 62-component mADM1 state
+# Call Codex MCP to generate complete 63-component mADM1 state
 mcp__ADM1-State-Variable-Estimator__codex(
     prompt="""
 Generate complete mADM1 state variables for:
@@ -116,7 +124,7 @@ Feedstock: High-strength municipal wastewater sludge
 COD: 50,000 mg/L | TSS: 35,000 mg/L | VSS: 28,000 mg/L
 TKN: 2,500 mg-N/L | TP: 500 mg-P/L | pH: 7.0
 
-Save to: ./adm1_state.json (all 62 components in kg/m³)
+Save to: ./adm1_state.json (all 63 components in kg/m³)
 """,
     cwd="/path/to/anaerobic-design-mcp"
 )
@@ -192,7 +200,7 @@ anaerobic-design-mcp/
 │   ├── sizing.py                   # Heuristic sizing
 │   └── simulation.py               # QSDsan integration
 ├── utils/
-│   ├── qsdsan_madm1.py             # 62-component mADM1 model
+│   ├── qsdsan_madm1.py             # 63-component mADM1 model
 │   ├── qsdsan_reactor_madm1.py     # Custom AnaerobicCSTR
 │   ├── qsdsan_simulation_sulfur.py # Simulation engine
 │   ├── inoculum_generator.py       # Enhanced inoculum (6× methanogen boost) ⭐
@@ -213,7 +221,7 @@ anaerobic-design-mcp/
 
 ### Validated Features
 
-- **Thermodynamic Rigor**: Production charge balance solver with all 62 components
+- **Thermodynamic Rigor**: Production charge balance solver with all 63 components
 - **Biogas Tracking**: 4-component biogas (H2, CH4, CO2, H2S) with Henry's law equilibrium
 - **Methane Yield**: 97.4% match to theoretical (validation against COD mass balance)
 - **pH Accuracy**: 6.5-7.5 range for typical digesters (fixed critical R units bug)
@@ -241,17 +249,13 @@ See [docs/bugs/CRITICAL_FIXES.md](docs/bugs/CRITICAL_FIXES.md) for details.
 
 ## Documentation
 
-- **[docs/INDEX.md](docs/INDEX.md)** - Complete documentation navigation hub
 - **[CLAUDE.md](CLAUDE.md)** - System prompt for Claude Code (workflow instructions)
-- **[BUG_TRACKER.md](BUG_TRACKER.md)** - Historical bug tracking (see CRITICAL_FIXES.md for current)
 
 ### Quick Links
 
-- [Architecture Overview](docs/architecture/OVERVIEW.md)
-- [Component Model (62 components)](docs/architecture/COMPONENT_MODEL.md)
+- [mADM1 Component Indices (63 components)](docs/architecture/MADM1_COMPONENT_INDICES.md)
+- [mADM1 Quick Reference](docs/architecture/MADM1_QUICK_REFERENCE.md)
 - [FastMCP-QSDsan Integration](docs/architecture/FASTMCP_QSDSAN.md)
-- [Critical Fixes Summary](docs/bugs/CRITICAL_FIXES.md)
-- [Workflow Testing Guide](docs/bugs/WORKFLOW_TESTING.md)
 
 ## Requirements
 
@@ -270,8 +274,7 @@ MIT License (see LICENSE file)
 ## Support
 
 - **Issues**: Submit via GitHub Issues
-- **Documentation**: See [docs/INDEX.md](docs/INDEX.md)
-- **Codex Integration**: See [.codex/AGENTS.md](.codex/AGENTS.md) for mADM1 component specification
+- **Documentation**: See docs/architecture/ directory for technical references
 
 ## Citation
 
@@ -285,16 +288,17 @@ If you use this server in research, please cite:
 **Current Version**: 0.1.0 (Production-Ready)
 
 **Recent Updates**:
+- 2025-11-22: Pre-release cleanup (removed obsolete docs and dead code)
+- 2025-11-04: Background Job Pattern implementation (prevents STDIO blocking)
 - 2025-10-29: Enhanced inoculum (6× methanogen boost) - CRITICAL FIX for startup stability
 - 2025-10-29: Token-efficient result parser (95% reduction: 7 KB vs 159 KB)
 - 2025-10-26: Comprehensive documentation consolidation
 - 2025-10-22: QSDsan convention alignment
 - 2025-10-21: Critical pH and unit conversion fixes
 - 2025-10-18: Production PCM solver implementation
-- 2025-10-18: Full mADM1 (62 components) integration
+- 2025-10-18: Full mADM1 (63 components) integration
 
-See [docs/development/REFACTORING_HISTORY.md](docs/development/REFACTORING_HISTORY.md) for detailed history.
 
 ---
 
-**Last Updated**: 2025-10-29
+**Last Updated**: 2025-11-22

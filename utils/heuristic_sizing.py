@@ -34,7 +34,10 @@ except ImportError:
 @dataclass
 class SizingConfig:
     """Configuration parameters for heuristic sizing."""
-    biomass_yield_default: float = 0.1  # kg TSS/kg COD
+    biomass_yield_default: float = 0.1  # kg TSS/kg COD (legacy global default)
+    carbohydrate_yield: float = 0.06  # kg TSS/kg COD for carbohydrate-rich fraction
+    protein_yield: float = 0.13  # kg TSS/kg COD for protein-rich fraction
+    lipid_yield: float = 0.03  # kg TSS/kg COD for lipid-rich fraction
     target_srt_days: float = 30.0  # days
     max_tss_without_mbr: float = 10000.0  # mg/L
     target_mlss_with_mbr: float = 15000.0  # mg/L
@@ -64,10 +67,211 @@ class SizingConfig:
     centrifuge_capture_fraction: float = 0.95  # 95% solids capture
 
 
+def _to_float(value: Any) -> Optional[float]:
+    """Convert values (including [value, unit] lists) to float."""
+    try:
+        if isinstance(value, (list, tuple)):
+            value = value[0]
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def calculate_substrate_aware_yield(
+    adm1_state: Optional[Dict[str, Any]],
+    config: Optional[SizingConfig] = None
+) -> float:
+    """
+    Estimate biomass yield from ADM1 substrate fractions using ADM1 stoichiometry.
+
+    ADM1 default yields (kg COD biomass / kg COD substrate):
+        Y_su=0.10, Y_aa=0.08, Y_fa=0.06, Y_c4=0.06, Y_pro=0.04, Y_ac=0.05, Y_h2=0.06
+    Default product splits:
+        sugars → 13% bu, 27% pro, 41% ac, 19% H2 (after growth)
+        amino acids → 23% va, 26% bu, 5% pro, 40% ac, 6% H2 (after growth)
+        LCFA → 70% ac, 30% H2 (after growth)
+        va → 54% pro, 31% ac, 15% H2; bu → 80% ac, 20% H2; pro → 57% ac, 43% H2
+
+    The calculation walks downstream once (sugar/aa/fatty → C4/propionate/acetate/H2 → methane),
+    summing biomass formed in each step. COD biomass is converted to TSS with 1.42 g COD/g VSS.
+
+    Returns:
+        Biomass yield in kg TSS / kg COD.
+    """
+    cfg = config or SizingConfig()
+
+    if not adm1_state:
+        return cfg.biomass_yield_default
+    # ADM1 default stoichiometric parameters (COD-based)
+    Y_su = 0.10
+    Y_aa = 0.08
+    Y_fa = 0.06
+    Y_c4 = 0.06
+    Y_pro = 0.04
+    Y_ac = 0.05
+    Y_h2 = 0.06
+    f_bu_su = 0.13
+    f_pro_su = 0.27
+    f_ac_su = 0.41
+    f_h2_su = 1.0 - f_bu_su - f_pro_su - f_ac_su  # 0.19
+    f_va_aa = 0.23
+    f_bu_aa = 0.26
+    f_pro_aa = 0.05
+    f_ac_aa = 0.40
+    f_h2_aa = 1.0 - f_va_aa - f_bu_aa - f_pro_aa - f_ac_aa  # 0.06
+    f_ac_fa = 0.70
+    f_h2_fa = 1.0 - f_ac_fa  # 0.30
+    f_ac_bu = 0.80
+    f_h2_bu = 1.0 - f_ac_bu  # 0.20
+    f_pro_va = 0.54
+    f_ac_va = 0.31
+    f_h2_va = 1.0 - f_pro_va - f_ac_va  # 0.15
+    f_ac_pro = 0.57
+    f_h2_pro = 1.0 - f_ac_pro  # 0.43
+    f_fa_li = 0.95  # hydrolysis accessibility of lipids
+    COD_PER_VSS = 1.42  # g COD / g VSS (Metcalf & Eddy)
+
+    def cod_yield_sugar() -> float:
+        available = 1.0 - Y_su
+        to_bu = f_bu_su * available
+        to_pro = f_pro_su * available
+        to_ac = f_ac_su * available
+        to_h2 = f_h2_su * available
+
+        biom_bu = to_bu * Y_c4
+        ac_from_bu = (to_bu * (1.0 - Y_c4)) * f_ac_bu
+        h2_from_bu = (to_bu * (1.0 - Y_c4)) * f_h2_bu
+
+        biom_pro = to_pro * Y_pro
+        ac_from_pro = (to_pro * (1.0 - Y_pro)) * f_ac_pro
+        h2_from_pro = (to_pro * (1.0 - Y_pro)) * f_h2_pro
+
+        ac_total = to_ac + ac_from_bu + ac_from_pro
+        h2_total = to_h2 + h2_from_bu + h2_from_pro
+
+        biom_ac = ac_total * Y_ac
+        biom_h2 = h2_total * Y_h2
+        return Y_su + biom_bu + biom_pro + biom_ac + biom_h2
+
+    def cod_yield_amino_acids() -> float:
+        available = 1.0 - Y_aa
+        to_va = f_va_aa * available
+        to_bu = f_bu_aa * available
+        to_pro = f_pro_aa * available
+        to_ac = f_ac_aa * available
+        to_h2 = f_h2_aa * available
+
+        biom_va = to_va * Y_c4
+        ac_from_va = (to_va * (1.0 - Y_c4)) * f_ac_va
+        h2_from_va = (to_va * (1.0 - Y_c4)) * f_h2_va
+
+        biom_bu = to_bu * Y_c4
+        ac_from_bu = (to_bu * (1.0 - Y_c4)) * f_ac_bu
+        h2_from_bu = (to_bu * (1.0 - Y_c4)) * f_h2_bu
+
+        biom_pro = to_pro * Y_pro
+        ac_from_pro = (to_pro * (1.0 - Y_pro)) * f_ac_pro
+        h2_from_pro = (to_pro * (1.0 - Y_pro)) * f_h2_pro
+
+        ac_total = to_ac + ac_from_va + ac_from_bu + ac_from_pro
+        h2_total = to_h2 + h2_from_va + h2_from_bu + h2_from_pro
+
+        biom_ac = ac_total * Y_ac
+        biom_h2 = h2_total * Y_h2
+        return Y_aa + biom_va + biom_bu + biom_pro + biom_ac + biom_h2
+
+    def cod_yield_fa(accessible_fraction: float = 1.0) -> float:
+        """Biomass from LCFA; accessible_fraction accounts for lipid hydrolysis."""
+        fa = accessible_fraction
+        biom_fa = fa * Y_fa
+        ac = (fa * (1.0 - Y_fa)) * f_ac_fa
+        h2 = (fa * (1.0 - Y_fa)) * f_h2_fa
+        biom_ac = ac * Y_ac
+        biom_h2 = h2 * Y_h2
+        return biom_fa + biom_ac + biom_h2
+
+    def cod_yield_va() -> float:
+        biom_c4 = Y_c4
+        remain = 1.0 - Y_c4
+        to_pro = remain * f_pro_va
+        to_ac = remain * f_ac_va
+        to_h2 = remain * f_h2_va
+        biom_pro = to_pro * Y_pro
+        ac = to_ac + (to_pro * (1.0 - Y_pro)) * f_ac_pro
+        h2 = to_h2 + (to_pro * (1.0 - Y_pro)) * f_h2_pro
+        biom_ac = ac * Y_ac
+        biom_h2 = h2 * Y_h2
+        return biom_c4 + biom_pro + biom_ac + biom_h2
+
+    def cod_yield_bu() -> float:
+        biom_c4 = Y_c4
+        remain = 1.0 - Y_c4
+        ac = remain * f_ac_bu
+        h2 = remain * f_h2_bu
+        biom_ac = ac * Y_ac
+        biom_h2 = h2 * Y_h2
+        return biom_c4 + biom_ac + biom_h2
+
+    def cod_yield_pro() -> float:
+        biom_pro = Y_pro
+        remain = 1.0 - Y_pro
+        ac = remain * f_ac_pro
+        h2 = remain * f_h2_pro
+        biom_ac = ac * Y_ac
+        biom_h2 = h2 * Y_h2
+        return biom_pro + biom_ac + biom_h2
+
+    cod_yield_map = {
+        # Hydrolysable/soluble substrates
+        "X_ch": cod_yield_sugar(),
+        "S_su": cod_yield_sugar(),
+        "X_pr": cod_yield_amino_acids(),
+        "S_aa": cod_yield_amino_acids(),
+        "X_li": cod_yield_fa(f_fa_li),
+        "S_fa": cod_yield_fa(1.0),
+        # Intermediates / VFAs
+        "S_va": cod_yield_va(),
+        "S_bu": cod_yield_bu(),
+        "S_pro": cod_yield_pro(),
+        "S_ac": Y_ac,
+        "S_h2": Y_h2,
+    }
+
+    total_cod = 0.0
+    total_biomass_cod = 0.0
+
+    for key, cod_yield in cod_yield_map.items():
+        val = _to_float(adm1_state.get(key))
+        if val is None or val <= 0:
+            continue
+        total_cod += val
+        total_biomass_cod += val * cod_yield
+
+    if total_cod <= 0:
+        logger.warning(
+            "ADM1 state missing substrate fractions; using default biomass yield %.3f",
+            cfg.biomass_yield_default
+        )
+        return cfg.biomass_yield_default
+
+    # Convert COD biomass to TSS (approximate VSS≈TSS for anaerobic biomass)
+    weighted_yield_tss = (total_biomass_cod / COD_PER_VSS) / total_cod
+
+    logger.info(
+        "Substrate-aware yield = %.3f kg TSS/kg COD (COD biomass %.3f per kg COD, total COD %.3f kg/m3)",
+        weighted_yield_tss,
+        total_biomass_cod / total_cod,
+        total_cod,
+    )
+
+    return weighted_yield_tss
+
+
 def calculate_biomass_production(
     feed_flow_m3d: float,
     cod_mg_l: float,
-    biomass_yield: Optional[float] = None
+    biomass_yield: Optional[float] = None,
+    adm1_state: Optional[Dict[str, Any]] = None
 ) -> Tuple[float, float]:
     """
     Calculate biomass production from COD load.
@@ -80,7 +284,7 @@ def calculate_biomass_production(
     config = SizingConfig()
     
     if biomass_yield is None:
-        biomass_yield = config.biomass_yield_default
+        biomass_yield = calculate_substrate_aware_yield(adm1_state, config)
     
     # Calculate COD load
     cod_load_kg_d = feed_flow_m3d * cod_mg_l / 1000.0  # kg/day
@@ -398,6 +602,7 @@ def size_low_tss_mbr_configuration(
 def perform_heuristic_sizing(
     basis_of_design: Dict[str, Any],
     biomass_yield: Optional[float] = None,
+    adm1_state: Optional[Dict[str, Any]] = None,
     target_srt_days: Optional[float] = None,
     mbr_type: Optional[str] = None,
     dewatering_type: Optional[str] = None,
@@ -425,7 +630,9 @@ def perform_heuristic_sizing(
 
     Args:
         basis_of_design: Dictionary with feed_flow_m3d, cod_mg_l, temperature_c
-        biomass_yield: Biomass yield in kg TSS/kg COD (default 0.1)
+        biomass_yield: Biomass yield in kg TSS/kg COD (override). If None, a substrate-aware
+                       weighted yield is computed from adm1_state; otherwise falls back to default.
+        adm1_state: Optional ADM1 state dict to derive substrate-aware biomass yield
         target_srt_days: Target SRT in days (default 30)
         mbr_type: "submerged" or "external_crossflow" (default "submerged")
         dewatering_type: Equipment type (default "centrifuge")
@@ -461,14 +668,16 @@ def perform_heuristic_sizing(
     if not feed_flow_m3d or not cod_mg_l:
         raise ValueError("feed_flow_m3d and cod_mg_l are required in basis_of_design")
     
+    yield_basis = "user_supplied"
     if biomass_yield is None:
-        biomass_yield = config.biomass_yield_default
+        biomass_yield = calculate_substrate_aware_yield(adm1_state, config)
+        yield_basis = "substrate_weighted_adm1" if adm1_state else "default_constant"
     if target_srt_days is None:
         target_srt_days = config.target_srt_days
     
     # Calculate biomass production
     cod_load_kg_d, biomass_production_kg_d = calculate_biomass_production(
-        feed_flow_m3d, cod_mg_l, biomass_yield
+        feed_flow_m3d, cod_mg_l, biomass_yield, adm1_state=adm1_state
     )
     
     # Calculate steady-state TSS concentration
@@ -635,6 +844,7 @@ def perform_heuristic_sizing(
             "cod_mg_l": cod_mg_l,
             "cod_load_kg_d": round(cod_load_kg_d, 1),
             "biomass_yield_kg_tss_kg_cod": biomass_yield,
+            "biomass_yield_basis": yield_basis,
             "biomass_production_kg_d": round(biomass_production_kg_d, 2),
             "steady_state_tss_mg_l": round(steady_state_tss_mg_l, 0),
             "target_srt_days": target_srt_days

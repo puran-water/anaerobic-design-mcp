@@ -157,6 +157,7 @@ def main():
         logger.info("Loading input data from JSON files...")
         input_dir = Path(args.input_dir)
         basis_file = input_dir / "basis.json"
+        adm1_file = input_dir / "adm1_state.json"
 
         if not basis_file.exists():
             logger.error(f"Input file not found: {basis_file}")
@@ -165,6 +166,29 @@ def main():
 
         with open(basis_file) as f:
             basis_of_design = json.load(f)
+
+        # Normalize historical keys (simulation exports use Q/Temp)
+        if "feed_flow_m3d" not in basis_of_design and "Q" in basis_of_design:
+            basis_of_design["feed_flow_m3d"] = basis_of_design["Q"]
+        if "temperature_c" not in basis_of_design and "Temp" in basis_of_design:
+            try:
+                basis_of_design["temperature_c"] = float(basis_of_design["Temp"]) - 273.15
+            except (TypeError, ValueError):
+                pass
+
+        adm1_state = None
+        if adm1_file.exists():
+            with open(adm1_file) as f:
+                adm1_state_raw = json.load(f)
+            adm1_state = {}
+            for k, v in adm1_state_raw.items():
+                if isinstance(v, (list, tuple)) and len(v) > 0:
+                    adm1_state[k] = float(v[0])
+                else:
+                    try:
+                        adm1_state[k] = float(v)
+                    except (TypeError, ValueError):
+                        continue
 
         # Validate basis has required keys
         required_keys = ['feed_flow_m3d', 'cod_mg_l']
@@ -186,6 +210,7 @@ def main():
 
         results = perform_heuristic_sizing(
             basis_of_design=basis_of_design,  # CRITICAL: Pass loaded basis as first param
+            adm1_state=adm1_state,
             target_srt_days=args.target_srt,
             mixing_type=args.mixing_type,
             biogas_application=args.biogas_application,

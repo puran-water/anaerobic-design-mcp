@@ -37,6 +37,13 @@ async def elicit_basis_of_design(
     try:
         # Normalize dict-like inputs
         current_values = coerce_to_dict(current_values) or {}
+
+        # Normalize common aliases before processing (prevents silent fallback to defaults)
+        if "feed_flow_m3d" not in current_values:
+            for alias in ["Q", "flow_m3_d", "flow_m3d", "influent_flow_m3d"]:
+                if alias in current_values:
+                    current_values["feed_flow_m3d"] = current_values[alias]
+                    break
         
         # Define parameter groups with prompts and defaults
         parameter_definitions = {
