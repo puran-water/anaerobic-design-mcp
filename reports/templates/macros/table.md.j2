@@ -1,0 +1,59 @@
+{# Table generation macros for consistent formatting #}
+
+{% macro parameter_table(params, columns=['Parameter', 'Value', 'Units']) %}
+| {{ columns|join(' | ') }} |
+|{{ '---|' * columns|length }}
+{% for param in params %}
+| {{ param.name }} | {{ param.value }} | {{ param.units or '' }} |
+{% endfor %}
+{% endmacro %}
+
+{% macro data_table(headers, rows, alignment=None) %}
+{# Generic table with configurable headers and rows #}
+| {{ headers|join(' | ') }} |
+|{{ '---|' * headers|length }}
+{% for row in rows %}
+| {{ row|join(' | ') }} |
+{% endfor %}
+{% endmacro %}
+
+{% macro format_value(value, precision=1, default='-') %}
+{# Format numeric values with precision, or show default for missing #}
+{# Handle [value, units] array format from ADM1 state #}
+{%- if value is sequence and value is not string and value|length > 0 -%}
+{%- set actual_value = value[0] -%}
+{%- else -%}
+{%- set actual_value = value -%}
+{%- endif -%}
+{%- if actual_value is none or actual_value == '' -%}
+{{ default }}
+{%- elif actual_value is number -%}
+{{ "%.{}f".format(precision)|format(actual_value) }}
+{%- else -%}
+{{ actual_value }}
+{%- endif -%}
+{% endmacro %}
+
+{% macro status_badge(status) %}
+{# Render status as emoji badge #}
+{%- if status == 'pass' or status == true -%}
+✓ Pass
+{%- elif status == 'fail' or status == false -%}
+⚠ Fail
+{%- elif status == 'warning' -%}
+⚠ Warning
+{%- else -%}
+{{ status }}
+{%- endif -%}
+{% endmacro %}
+
+{% macro key_metric(name, value, units='', precision=2) %}
+{# Format a key metric with star indicator #}
+{# Handle [value, units] array format #}
+{%- if value is sequence and value is not string and value|length > 0 -%}
+{%- set actual_value = value[0] -%}
+{%- else -%}
+{%- set actual_value = value -%}
+{%- endif -%}
+**★ {{ name }}:** {{ format_value(actual_value, precision) }} {{ units }}
+{% endmacro %}

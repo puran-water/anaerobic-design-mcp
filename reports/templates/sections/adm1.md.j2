@@ -1,0 +1,59 @@
+## 2. ADM1 State Variables
+
+### Substrate Fractionation
+
+| Component | Concentration | Units | Description |
+|-----------|---------------|-------|-------------|
+{% if adm1_state %}
+| S_su | {{ macros.format_value(adm1_state.S_su, 4) }} | kg COD/m³ | Monosaccharides |
+| S_aa | {{ macros.format_value(adm1_state.S_aa, 4) }} | kg COD/m³ | Amino acids |
+| S_fa | {{ macros.format_value(adm1_state.S_fa, 4) }} | kg COD/m³ | Long chain fatty acids |
+| S_va | {{ macros.format_value(adm1_state.S_va, 4) }} | kg COD/m³ | Valerate |
+| S_bu | {{ macros.format_value(adm1_state.S_bu, 4) }} | kg COD/m³ | Butyrate |
+| S_pro | {{ macros.format_value(adm1_state.S_pro, 4) }} | kg COD/m³ | Propionate |
+| S_ac | {{ macros.format_value(adm1_state.S_ac, 4) }} | kg COD/m³ | Acetate |
+| S_h2 | {{ macros.format_value(adm1_state.S_h2, 6) }} | kg COD/m³ | Hydrogen |
+| S_ch4 | {{ macros.format_value(adm1_state.S_ch4, 4) }} | kg COD/m³ | Dissolved methane |
+{% endif %}
+
+### Particulate Substrates
+
+| Component | Concentration | Units | Description |
+|-----------|---------------|-------|-------------|
+{% if adm1_state %}
+| X_c | {{ macros.format_value(adm1_state.X_c, 3) }} | kg COD/m³ | Composites |
+| X_ch | {{ macros.format_value(adm1_state.X_ch, 3) }} | kg COD/m³ | Carbohydrates |
+| X_pr | {{ macros.format_value(adm1_state.X_pr, 3) }} | kg COD/m³ | Proteins |
+| X_li | {{ macros.format_value(adm1_state.X_li, 3) }} | kg COD/m³ | Lipids |
+| X_I | {{ macros.format_value(adm1_state.X_I, 3) }} | kg COD/m³ | Inert particulates |
+{% endif %}
+
+### Biomass Concentrations (Inoculum)
+
+| Component | Concentration | Units | Description |
+|-----------|---------------|-------|-------------|
+{% if adm1_state %}
+| X_su | {{ macros.format_value(adm1_state.X_su, 4) }} | kg COD/m³ | Sugar degraders |
+| X_aa | {{ macros.format_value(adm1_state.X_aa, 4) }} | kg COD/m³ | Amino acid degraders |
+| X_fa | {{ macros.format_value(adm1_state.X_fa, 4) }} | kg COD/m³ | LCFA degraders |
+| X_c4 | {{ macros.format_value(adm1_state.X_c4, 4) }} | kg COD/m³ | Valerate/butyrate degraders |
+| X_pro | {{ macros.format_value(adm1_state.X_pro, 4) }} | kg COD/m³ | Propionate degraders |
+| X_ac | {{ macros.format_value(adm1_state.X_ac, 4) }} | kg COD/m³ | Acetoclastic methanogens |
+| X_h2 | {{ macros.format_value(adm1_state.X_h2, 4) }} | kg COD/m³ | Hydrogenotrophic methanogens |
+{% endif %}
+
+{% if validation %}
+### Validation Results
+
+| Check | Computed | Target | Status |
+|-------|----------|--------|--------|
+{% if validation.cod_balance %}
+| Total COD | {{ macros.format_value(validation.cod_balance.computed_mg_l, 0) }} mg/L | {{ macros.format_value(validation.cod_balance.target_mg_l, 0) }} mg/L | {{ macros.status_badge(validation.cod_balance.passed) }} |
+{% endif %}
+{% if validation.tss_balance %}
+| TSS | {{ macros.format_value(validation.tss_balance.computed_mg_l, 0) }} mg/L | {{ macros.format_value(validation.tss_balance.target_mg_l, 0) }} mg/L | {{ macros.status_badge(validation.tss_balance.passed) }} |
+{% endif %}
+{% if validation.ion_balance %}
+| Ion Balance | {{ macros.format_value(validation.ion_balance.imbalance_percent, 1) }}% | < 5% | {{ macros.status_badge(validation.ion_balance.passed) }} |
+{% endif %}
+{% endif %}

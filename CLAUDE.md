@@ -395,6 +395,42 @@ This displays three formatted tables:
 
 **Token Savings:** Reads 7 KB instead of 159 KB = **95% reduction in tokens**
 
+### Step 7: Generate Design Report (OPTIONAL)
+
+Generate a comprehensive Markdown report with Obsidian-compatible frontmatter:
+
+```python
+mcp__anaerobic-design__generate_design_report(
+    job_id="7bfeb02a",      # Job ID from simulation
+    output_format="markdown"  # Currently only markdown supported
+)
+```
+
+**Report Structure:**
+1. **Obsidian Frontmatter** - YAML metadata (project, reactor_type, flow, COD, tags, status)
+2. **Basis of Design** - Influent characteristics, mass loadings, design conditions
+3. **ADM1 State Variables** - Substrate fractionation, particulates, biomass concentrations
+4. **Reactor Sizing** - Tank dimensions, mixing system, thermal analysis, biogas handling
+5. **Process Performance** - Stream comparison, biogas production, specific CH₄ yield, biomass yield
+6. **Process Health** - Methanogen health, pH/ammonia/hydrogen/H₂S inhibition analysis
+7. **Mineral Precipitation** - Struvite, HAP, FeS, calcite formation rates
+8. **Design Summary** - Critical issues, warnings, recommendations, key parameters
+
+**Output:**
+- Reports saved to `reports/output/{project_name}_{timestamp}.md`
+- Example filename: `AD_8000_m3d_7682_COD_20251124_220241.md`
+
+**Template System:**
+- Jinja2 templates in `reports/templates/`
+- Macros for formatting in `reports/templates/macros/table.md.j2`
+- Section templates in `reports/templates/sections/`
+- Base template: `reports/templates/base_report.md.j2`
+
+**Alternative CLI usage:**
+```bash
+python -m reports.markdown_report 7bfeb02a
+```
+
 ## Critical Units (mADM1 vs QSDsan)
 
 **mADM1 State Variables (in JSON files)**:
@@ -410,9 +446,11 @@ This displays three formatted tables:
 ## Key Files
 
 - `utils/inoculum_generator.py`: Scales biomass + alkalinity for CSTR startup
-- `utils/qsdsan_madm1.py`: mADM1 process model (62 components, P/S/Fe extensions)
+- `utils/qsdsan_madm1.py`: mADM1 process model (63 components, P/S/Fe extensions)
 - `utils/simulate_cli.py`: QSDsan simulation wrapper
 - `utils/validate_cli.py`: Bulk composite validation (COD, TSS, pH, ion balance)
+- `reports/markdown_report.py`: Markdown report generator with Jinja2 templates
+- `reports/templates/`: Jinja2 template files for report sections
 
 ## Testing Notes
 

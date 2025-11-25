@@ -1,0 +1,42 @@
+## 1. Basis of Design
+
+### Influent Characteristics
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Flow Rate (Q) | {{ macros.format_value(flow_m3d, 0) }} | m³/d | Design flow |
+| COD | {{ macros.format_value(cod_mg_l, 0) }} | mg/L | Total COD |
+| TSS | {{ macros.format_value(tss_mg_l, 0) }} | mg/L | Total suspended solids |
+| VSS | {{ macros.format_value(vss_mg_l, 0) }} | mg/L | Volatile suspended solids |
+| TKN | {{ macros.format_value(tkn_mg_l, 0) }} | mg-N/L | Total Kjeldahl nitrogen |
+| TP | {{ macros.format_value(tp_mg_l, 0) }} | mg-P/L | Total phosphorus |
+| pH | {{ macros.format_value(ph, 1) }} | - | Influent pH |
+| Alkalinity | {{ macros.format_value(alkalinity_meq_l, 0) }} | meq/L | Carbonate alkalinity |
+
+### Mass Loading
+
+| Parameter | Value | Units |
+|-----------|-------|-------|
+| COD Load | {{ macros.format_value(cod_load_kg_d, 0) }} | kg COD/d |
+| TSS Load | {{ macros.format_value(tss_load_kg_d, 0) }} | kg TSS/d |
+| VSS Load | {{ macros.format_value(vss_load_kg_d, 0) }} | kg VSS/d |
+| TKN Load | {{ macros.format_value(tkn_load_kg_d, 1) }} | kg N/d |
+| TP Load | {{ macros.format_value(tp_load_kg_d, 1) }} | kg P/d |
+
+### Design Conditions
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Temperature | {{ macros.format_value(temperature_c, 0) }} | °C | Operating temperature |
+| Design SRT | {{ macros.format_value(srt_days, 0) }} | days | Solids retention time |
+| Design HRT | {{ macros.format_value(hrt_days, 1) }} | days | Hydraulic retention time |
+| OLR | {{ macros.format_value(olr_kg_cod_m3_d, 2) }} | kg COD/m³/d | Organic loading rate |
+
+{% if feedstock_type %}
+### Feedstock Classification
+
+**Type:** {{ feedstock_type }}
+{% if feedstock_notes %}
+**Notes:** {{ feedstock_notes }}
+{% endif %}
+{% endif %}

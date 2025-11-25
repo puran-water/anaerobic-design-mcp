@@ -1,0 +1,72 @@
+## 3. Reactor Sizing
+
+### Tank Dimensions
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Reactor Volume | {{ macros.format_value(volume_m3, 0) }} | m³ | Working volume |
+| Diameter | {{ macros.format_value(diameter_m, 2) }} | m | Internal diameter |
+| Sidewall Height | {{ macros.format_value(height_m, 2) }} | m | Liquid depth |
+| H/D Ratio | {{ macros.format_value(hd_ratio, 2) }} | - | Height to diameter ratio |
+| Freeboard | {{ macros.format_value(freeboard_m, 1) }} | m | Gas space above liquid |
+
+{% if n_tanks and n_tanks > 1 %}
+### Multi-Tank Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Number of Tanks | {{ n_tanks }} |
+| Volume per Tank | {{ macros.format_value(volume_m3 / n_tanks, 0) }} m³ |
+{% endif %}
+
+### Mixing System
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Mixing Type | {{ mixing_type }} | - | {{ mixing_type_description or '' }} |
+{% if mixing_type == 'mechanical' %}
+| Impeller Type | {{ impeller_type }} | - | |
+| Impeller Diameter | {{ macros.format_value(impeller_diameter_m, 2) }} | m | |
+| Impeller Speed | {{ macros.format_value(impeller_speed_rpm, 1) }} | rpm | |
+| Power Number (Np) | {{ macros.format_value(power_number, 2) }} | - | |
+| Reynolds Number | {{ macros.format_value(reynolds_number, 0) }} | - | {{ flow_regime or '' }} |
+{% endif %}
+| Mixing Power | {{ macros.format_value(mixing_power_kw, 1) }} | kW | Total shaft power |
+| Specific Power | {{ macros.format_value(mixing_power_w_m3, 1) }} | W/m³ | Volumetric power input |
+
+{% if mixing_type == 'pumped' or mixing_type == 'hybrid' %}
+### Pumped Recirculation
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Recirculation Rate | {{ macros.format_value(recirculation_m3_h, 0) }} | m³/h | |
+| Turnovers per Hour | {{ macros.format_value(turnovers_per_hour, 1) }} | 1/h | |
+| Pump TDH | {{ macros.format_value(pump_tdh_m, 1) }} | m | |
+| Pump Power | {{ macros.format_value(pump_power_kw, 1) }} | kW | |
+{% if eductor_mode %}
+| Eductor Mode | Yes | - | Jet pump entrainment |
+| Entrainment Ratio | {{ macros.format_value(entrainment_ratio, 1) }} | - | Total:Motive flow |
+| Motive Flow | {{ macros.format_value(motive_flow_m3_h, 0) }} | m³/h | Pump discharge |
+{% endif %}
+{% endif %}
+
+### Thermal Analysis
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Operating Temperature | {{ macros.format_value(temperature_c, 0) }} | °C | Mesophilic range |
+| Feedstock Inlet Temp | {{ macros.format_value(feedstock_inlet_temp_c, 0) }} | °C | |
+| Ambient Temperature | {{ macros.format_value(ambient_temp_c, 0) }} | °C | Design condition |
+| Insulation R-Value | {{ macros.format_value(insulation_r_value, 2) }} | m²K/W | |
+| Tank Heat Loss | {{ macros.format_value(tank_heat_loss_kw, 1) }} | kW | Through walls/roof |
+| Feedstock Heating | {{ macros.format_value(feedstock_heating_kw, 1) }} | kW | Feed preheat requirement |
+| **Total Heat Duty** | **{{ macros.format_value(total_heat_duty_kw, 1) }}** | **kW** | |
+
+### Biogas Handling
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Biogas Production | {{ macros.format_value(biogas_production_m3_d, 0) }} | m³/d | At STP |
+| Design Pressure | {{ macros.format_value(biogas_pressure_kpa, 1) }} | kPa(g) | Headspace pressure |
+| Blower Capacity | {{ macros.format_value(blower_capacity_m3_h, 0) }} | m³/h | |
+| Blower Power | {{ macros.format_value(blower_power_kw, 1) }} | kW | |

@@ -1,0 +1,60 @@
+## 6. Mineral Precipitation & Resource Recovery
+
+### Precipitation Summary
+
+| Parameter | Value | Units |
+|-----------|-------|-------|
+| Total Precipitation | {{ macros.format_value(total_precipitation_kg_d, 1) }} | kg/d |
+| Phosphorus Precipitated | {{ macros.format_value(phosphorus_precipitated_kg_d, 2) }} | kg-P/d |
+| Sulfur Precipitated | {{ macros.format_value(sulfur_precipitated_kg_d, 2) }} | kg-S/d |
+
+### Mineral Formation Rates
+
+| Mineral | Formula | Rate | Units |
+|---------|---------|------|-------|
+| Struvite | MgNH₄PO₄·6H₂O | {{ macros.format_value(minerals.struvite_kg_d, 2) }} | kg/d |
+| K-Struvite | KMgPO₄·6H₂O | {{ macros.format_value(minerals.k_struvite_kg_d, 2) }} | kg/d |
+| Hydroxyapatite (HAP) | Ca₅(PO₄)₃OH | {{ macros.format_value(minerals.hydroxyapatite_kg_d, 2) }} | kg/d |
+| Calcite | CaCO₃ | {{ macros.format_value(minerals.calcite_kg_d, 2) }} | kg/d |
+| Iron Sulfide | FeS | {{ macros.format_value(minerals.fes_kg_d, 2) }} | kg/d |
+
+{% if minerals.struvite_kg_d > 0.1 or minerals.hydroxyapatite_kg_d > 0.1 %}
+### Phosphorus Recovery Potential
+
+| Mineral | P Content | P Recovery |
+|---------|-----------|------------|
+{% if minerals.struvite_kg_d > 0.01 %}
+| Struvite | 12.6% | {{ macros.format_value(minerals.struvite_kg_d * 0.126, 2) }} kg-P/d |
+{% endif %}
+{% if minerals.k_struvite_kg_d > 0.01 %}
+| K-Struvite | 13.7% | {{ macros.format_value(minerals.k_struvite_kg_d * 0.137, 2) }} kg-P/d |
+{% endif %}
+{% if minerals.hydroxyapatite_kg_d > 0.01 %}
+| Hydroxyapatite | 18.5% | {{ macros.format_value(minerals.hydroxyapatite_kg_d * 0.185, 2) }} kg-P/d |
+{% endif %}
+{% endif %}
+
+### Dissolved Nutrient Concentrations (Effluent)
+
+| Parameter | Concentration | Units |
+|-----------|---------------|-------|
+| Orthophosphate (PO₄-P) | {{ macros.format_value(dissolved.po4_mg_P_l, 1) }} | mg-P/L |
+| Sulfate (SO₄-S) | {{ macros.format_value(dissolved.so4_mg_S_l, 1) }} | mg-S/L |
+| Calcium (Ca²⁺) | {{ macros.format_value(dissolved.ca_mg_l, 1) }} | mg/L |
+| Iron (Fe²⁺/Fe³⁺) | {{ macros.format_value(dissolved.fe_mg_l, 1) }} | mg/L |
+
+{% if chemical_dosing %}
+### Chemical Dosing Applied
+
+| Chemical | Dose | Purpose |
+|----------|------|---------|
+{% if chemical_dosing.fecl3_mg_l > 0 %}
+| FeCl₃ | {{ macros.format_value(chemical_dosing.fecl3_mg_l, 0) }} mg/L | Sulfide/phosphate control |
+{% endif %}
+{% if chemical_dosing.naoh_mg_l > 0 %}
+| NaOH | {{ macros.format_value(chemical_dosing.naoh_mg_l, 0) }} mg/L | pH adjustment |
+{% endif %}
+{% if chemical_dosing.na2co3_mg_l > 0 %}
+| Na₂CO₃ | {{ macros.format_value(chemical_dosing.na2co3_mg_l, 0) }} mg/L | Alkalinity supplementation |
+{% endif %}
+{% endif %}

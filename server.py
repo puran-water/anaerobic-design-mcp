@@ -669,6 +669,50 @@ async def estimate_chemical_dosing(
     return await _impl(use_current_state, custom_params, objectives)
 
 
+@mcp.tool()
+async def generate_design_report(
+    output_format: str = "markdown",
+    job_id: str = None,
+    include_timeseries: bool = False
+):
+    """
+    Generate a comprehensive design report from current state and simulation results.
+
+    Creates a Markdown report with Obsidian-compatible frontmatter containing:
+    - Basis of Design (influent characteristics, mass loadings)
+    - ADM1 State Variables (substrate fractionation, validation)
+    - Reactor Sizing (tank dimensions, mixing, thermal analysis)
+    - Process Performance (biogas production, yields, removal efficiency)
+    - Process Health (inhibition analysis, methanogen health)
+    - Mineral Precipitation (resource recovery potential)
+
+    Args:
+        output_format: Report format ("markdown" only for now)
+        job_id: Optional job ID to load results from specific job directory
+        include_timeseries: Include time series plots (future feature, not yet implemented)
+
+    Returns:
+        Dict with status and path to generated report file
+    """
+    from reports.markdown_report import MarkdownReportBuilder
+
+    try:
+        builder = MarkdownReportBuilder()
+        result = builder.generate(job_id=job_id, output_format=output_format)
+
+        return {
+            "status": "success",
+            "report_path": result["markdown"],
+            "format": output_format,
+            "message": f"Report generated successfully: {result['markdown']}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Report generation failed: {str(e)}"
+        }
+
+
 # ==============================================================================
 # BACKGROUND JOB MANAGEMENT TOOLS
 # ==============================================================================

@@ -1,0 +1,65 @@
+## 5. Process Health
+
+### Methanogen Health Assessment
+
+| Methanogen Type | Health | Status |
+|-----------------|--------|--------|
+| Acetoclastic | {{ macros.format_value(acetoclastic_health_percent, 1) }}% | {{ macros.status_badge('pass' if acetoclastic_health_percent > 50 else 'fail') }} |
+| Hydrogenotrophic | {{ macros.format_value(hydrogenotrophic_health_percent, 1) }}% | {{ macros.status_badge('pass' if hydrogenotrophic_health_percent > 50 else 'fail') }} |
+| **Overall** | **{{ macros.format_value(overall_methanogen_health_percent, 1) }}%** | {{ macros.status_badge('pass' if overall_methanogen_health_percent > 50 else 'fail') }} |
+
+{% if limiting_factors %}
+### Limiting Factors
+
+{% for factor in limiting_factors %}
+- {{ factor }}
+{% endfor %}
+{% endif %}
+
+### Inhibition Analysis
+
+#### pH Inhibition
+
+| Methanogen Type | Inhibition | Notes |
+|-----------------|------------|-------|
+| Acetoclastic | {{ macros.format_value(ph_inhibition.acetoclastic_percent, 1) }}% | Optimal: 6.8-7.4 |
+| Hydrogenotrophic | {{ macros.format_value(ph_inhibition.hydrogenotrophic_percent, 1) }}% | Optimal: 6.5-7.8 |
+
+#### Ammonia Inhibition
+
+| Parameter | Value | Units |
+|-----------|-------|-------|
+| Total Ammonia (TAN) | {{ macros.format_value(ammonia_inhibition.total_ammonia_mg_l, 0) }} | mg-N/L |
+| Free Ammonia (NH₃) | {{ macros.format_value(ammonia_inhibition.free_ammonia_mg_l, 0) }} | mg-N/L |
+| Inhibition | {{ macros.format_value(ammonia_inhibition.acetoclastic_percent, 1) }}% | |
+
+{% if ammonia_inhibition.acetoclastic_percent > 20 %}
+⚠ **Warning:** Elevated ammonia inhibition detected. Consider pH reduction or dilution.
+{% endif %}
+
+#### Hydrogen Inhibition
+
+| Degradation Pathway | Inhibition | Notes |
+|---------------------|------------|-------|
+| Propionate Oxidation | {{ macros.format_value(hydrogen_inhibition.propionate_percent, 1) }}% | H₂ threshold: 10⁻⁴ atm |
+| LCFA Oxidation | {{ macros.format_value(hydrogen_inhibition.lcfa_percent, 1) }}% | |
+
+#### H₂S Inhibition
+
+| Parameter | Value | Units |
+|-----------|-------|-------|
+| Dissolved H₂S | {{ macros.format_value(h2s_inhibition.h2s_concentration_mg_l, 1) }} | mg-S/L |
+| Acetoclastic Inhibition | {{ macros.format_value(h2s_inhibition.acetoclastic_percent, 1) }}% | |
+| Hydrogenotrophic Inhibition | {{ macros.format_value(h2s_inhibition.hydrogenotrophic_percent, 1) }}% | |
+
+{% if h2s_inhibition.h2s_concentration_mg_l > 200 %}
+⚠ **Warning:** High sulfide levels. Consider iron dosing for sulfide precipitation.
+{% endif %}
+
+### Stability Summary
+
+| Indicator | Value | Target | Status |
+|-----------|-------|--------|--------|
+| Overall Health | {{ macros.format_value(overall_methanogen_health_percent, 0) }}% | > 70% | {{ macros.status_badge('pass' if overall_methanogen_health_percent > 70 else ('warning' if overall_methanogen_health_percent > 50 else 'fail')) }} |
+| VFA/Alk Ratio | {{ macros.format_value(vfa_alk_ratio, 3) }} | < 0.4 | {{ macros.status_badge(vfa_alk_status) }} |
+| pH | {{ macros.format_value(effluent_ph, 2) }} | 6.8-7.4 | {{ macros.status_badge(ph_status) }} |

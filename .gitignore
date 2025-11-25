@@ -2,6 +2,9 @@
 simulation_*.json
 adm1_state.json
 
+# Generated reports (keep templates, ignore output)
+reports/output/*.md
+
 # Test files and outputs
 test_*.py
 test_*.json

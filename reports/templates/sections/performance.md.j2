@@ -1,0 +1,49 @@
+## 4. Process Performance
+
+### Stream Comparison
+
+| Parameter | Influent | Effluent | Removal | Units |
+|-----------|----------|----------|---------|-------|
+| COD | {{ macros.format_value(influent.cod_mg_l, 0) }} | {{ macros.format_value(effluent.cod_mg_l, 0) }} | {{ macros.format_value(cod_removal_percent, 1) }}% | mg/L |
+| TSS | {{ macros.format_value(influent.tss_mg_l, 0) }} | {{ macros.format_value(effluent.tss_mg_l, 0) }} | {{ macros.format_value(tss_removal_percent, 1) }}% | mg/L |
+| VSS | {{ macros.format_value(influent.vss_mg_l, 0) }} | {{ macros.format_value(effluent.vss_mg_l, 0) }} | {{ macros.format_value(vss_removal_percent, 1) }}% | mg/L |
+| pH | {{ macros.format_value(influent.ph, 2) }} | {{ macros.format_value(effluent.ph, 2) }} | - | - |
+| VFA | {{ macros.format_value(influent.vfa_mg_l, 0) }} | {{ macros.format_value(effluent.vfa_mg_l, 0) }} | - | mg/L as HAc |
+| Alkalinity | {{ macros.format_value(influent.alkalinity_meq_l, 0) }} | {{ macros.format_value(effluent.alkalinity_meq_l, 0) }} | - | meq/L |
+
+### Biogas Production
+
+| Parameter | Value | Units |
+|-----------|-------|-------|
+| Total Biogas | {{ macros.format_value(biogas.total_m3_d, 0) }} | m³/d |
+| Methane (CH₄) | {{ macros.format_value(biogas.ch4_percent, 1) }} | % |
+| Carbon Dioxide (CO₂) | {{ macros.format_value(biogas.co2_percent, 1) }} | % |
+| Hydrogen (H₂) | {{ macros.format_value(biogas.h2_percent, 2) }} | % |
+| Hydrogen Sulfide (H₂S) | {{ macros.format_value(biogas.h2s_ppm, 0) }} | ppm |
+| Methane Flow | {{ macros.format_value(biogas.ch4_m3_d, 0) }} | m³ CH₄/d |
+
+### Key Performance Metrics
+
+{{ macros.key_metric('Specific Methane Yield', specific_methane_yield_m3_kg_cod, 'm³ CH₄/kg COD removed', 3) }}
+
+{{ macros.key_metric('Specific Methane Yield', specific_methane_yield_L_kg_cod, 'L CH₄/kg COD removed', 0) }}
+
+{{ macros.key_metric('Net Biomass Yield (VSS)', net_biomass_yield_vss, 'kg VSS/kg COD removed', 3) }}
+
+{{ macros.key_metric('Net Biomass Yield (TSS)', net_biomass_yield_tss, 'kg TSS/kg COD removed', 3) }}
+
+### Yield Analysis
+
+| Parameter | Value | Units | Notes |
+|-----------|-------|-------|-------|
+| Theoretical CH₄ Yield | 0.35 | m³/kg COD | At STP |
+| Actual CH₄ Yield | {{ macros.format_value(specific_methane_yield_m3_kg_cod, 3) }} | m³/kg COD | |
+| Yield Efficiency | {{ macros.format_value(yield_efficiency_percent, 1) }} | % | Actual/Theoretical |
+
+### Process Stability
+
+| Parameter | Value | Target | Status |
+|-----------|-------|--------|--------|
+| Effluent pH | {{ macros.format_value(effluent.ph, 2) }} | 6.8 - 7.4 | {{ macros.status_badge(ph_status) }} |
+| VFA/Alkalinity | {{ macros.format_value(vfa_alk_ratio, 3) }} | < 0.4 | {{ macros.status_badge(vfa_alk_status) }} |
+| VFA | {{ macros.format_value(effluent.vfa_mg_l, 0) }} mg/L | < 500 | {{ macros.status_badge(vfa_status) }} |
