@@ -1,12 +1,14 @@
 # Anaerobic Design MCP Server
 
-Production-ready MCP (Model Context Protocol) server for anaerobic digester design using the complete mADM1 (Modified ADM1) process model with 63 components (62 state variables + H2O).
+> **⚠️ DEVELOPMENT STATUS: This project is under active development and is not yet production-ready. APIs, interfaces, and functionality may change without notice. Use at your own risk for evaluation and testing purposes only. Not recommended for production deployments.**
+
+MCP (Model Context Protocol) server for anaerobic digester design using the complete mADM1 (Modified ADM1) process model with 63 components (62 state variables + H2O).
 
 ## Overview
 
-This server provides an end-to-end workflow for designing anaerobic digesters treating high-strength wastewater, from feedstock characterization through dynamic simulation. It leverages QSDsan's production-grade mADM1 model with phosphorus/sulfur/iron extensions for comprehensive nutrient recovery and biogas production modeling.
+This server provides an end-to-end workflow for designing anaerobic digesters treating high-strength wastewater, from feedstock characterization through dynamic simulation. It leverages QSDsan's mADM1 model with phosphorus/sulfur/iron extensions for nutrient recovery and biogas production modeling.
 
-**Status**: Production-Ready + Background Job Pattern (2025-11-22)
+**Status**: In Development (Active)
 
 ## Key Features
 
@@ -217,9 +219,9 @@ anaerobic-design-mcp/
     └── diagnostics/                # Analysis guides
 ```
 
-## Production Readiness
+## Current Capabilities
 
-### Validated Features
+### Implemented Features
 
 - **Thermodynamic Rigor**: Production charge balance solver with all 63 components
 - **Biogas Tracking**: 4-component biogas (H2, CH4, CO2, H2S) with Henry's law equilibrium
@@ -285,7 +287,7 @@ If you use this server in research, please cite:
 
 ## Development Status
 
-**Current Version**: 0.1.0 (Production-Ready)
+**Current Version**: 0.1.0-dev (In Development)
 
 **Recent Updates**:
 - 2025-11-22: Pre-release cleanup (removed obsolete docs and dead code)
