@@ -205,8 +205,8 @@ anaerobic-design-mcp/
 │   ├── qsdsan_madm1.py             # 63-component mADM1 model
 │   ├── qsdsan_reactor_madm1.py     # Custom AnaerobicCSTR
 │   ├── qsdsan_simulation_sulfur.py # Simulation engine
-│   ├── inoculum_generator.py       # Enhanced inoculum (6× methanogen boost) ⭐
-│   ├── parse_simulation_results.py # Token-efficient result parser ⭐
+│   ├── inoculum_generator.py       # Enhanced inoculum
+│   ├── parse_simulation_results.py # Token-efficient result parser
 │   ├── validate_cli.py             # CLI validation tools
 │   └── simulate_cli.py             # CLI simulation wrapper
 ├── core/
