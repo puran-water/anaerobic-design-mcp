@@ -48,3 +48,8 @@ archive/
 Thumbs.db
 jobs/
 state/
+
+# Pip cache (never commit)
+.pipcache/
+.piptmp/
+.pip-cache/
